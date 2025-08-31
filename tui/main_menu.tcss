@@ -1,0 +1,12 @@
+#main-menu{
+    align: center middle;
+}
+
+#title-txt{
+    align: center middle;
+}
+
+#menu-btns{
+    layout: horizontal;
+    align: center middle;
+}
