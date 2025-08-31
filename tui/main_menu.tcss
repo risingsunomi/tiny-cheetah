@@ -1,8 +1,10 @@
-#main-menu{
+Screen {
+    layout: vertical;
     align: center middle;
 }
 
-#title-txt{
+#main-menu{
+    layout: horizontal;
     align: center middle;
 }
 
