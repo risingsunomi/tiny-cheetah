@@ -30,7 +30,7 @@ class MLP:
             return x.selu()
         return x
 
-    def forward(self, x):
+    def __call__(self, x):
         return self.down_proj(
             self.activation_fn(self.gate_proj(x)) * self.up_proj(x)
         )

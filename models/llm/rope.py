@@ -29,17 +29,20 @@ class RotaryPositionalEmbedding:
         self.scale_factor = scale_factor
         self.cache = None
 
-        # inv_freq = 1 / (base ** (i / dim)) for i in [0,2,...,dim-2]
         self.theta = 1.0 / (self.base ** (
-            tinygrad.Tensor.arange(0, self.dim, 2)[: (self.dim//2)].float() / self.dim
+            tinygrad.Tensor.arange(
+                0,
+                self.dim,
+                2
+            )[: (self.dim//2)].float() / self.dim
         ))
         if self.is_scaling:
             self.theta = self.apply_scaling(self.theta)
 
     def build_rope_cache(self) -> tinygrad.Tensor:
-        # Build the rotary position embedding cache
         seq_idx = tinygrad.Tensor.arange(self.max_seq_len)
-        idx_theta = tinygrad.Tensor.einsum("i, j -> ij", seq_idx, self.theta).float()
+        idx_theta = tinygrad.Tensor.einsum(
+            "i, j -> ij", seq_idx, self.theta).float()
         self.cache = tinygrad.Tensor.stack([
             tinygrad.Tensor.cos(idx_theta),
             tinygrad.Tensor.sin(idx_theta)
@@ -60,31 +63,32 @@ class RotaryPositionalEmbedding:
                 new_freqs.append(freq / self.scale_factor)
             else:
                 assert low_freq_wavelen != high_freq_wavelen
-                smooth = (self.old_context_len / wavelen - self.low_freq_factor) / (
-                     self.high_freq_factor -  self.low_freq_factor
+                smooth = (
+                    self.old_context_len / wavelen - self.low_freq_factor
+                ) / (
+                    self.high_freq_factor - self.low_freq_factor
                 )
+
                 new_freqs.append(
                     (1 - smooth) * freq /  self.scale_factor + smooth * freq
                 )
 
         return tinygrad.Tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
 
-    def forward(self, x: tinygrad.Tensor) -> tinygrad.Tensor:
+    def __call__(
+        self,
+        x: tinygrad.Tensor,
+        input_pos: Optional[tinygrad.Tensor]
+    ) -> tinygrad.Tensor:
         if self.cache is None:
             self.build_rope_cache()
 
-        # Support inputs with shape (..., T, D) where D==self.dim and T is sequence length
         assert x.shape[-1] == self.dim, "Last dim must equal RoPE dim"
         assert self.dim % 2 == 0, "RoPE dim must be even"
 
         seq_len = x.shape[-2]
-        # cache: (max_seq_len, D//2, 2) -> (T, D//2, 2)
-        cs = self.cache[:seq_len]
-
-        # Pair the last dimension: (..., T, D//2, 2)
+        cs = self.cache[:seq_len] if input_pos is None else self.cache[input_pos]
         x_pairs = x.float().reshape(*x.shape[:-1], -1, 2)
-
-        # Add leading singleton dims to cache for broadcasting
         lead = x_pairs.ndim - cs.ndim
         if lead > 0:
             cs = cs.reshape(*((1,) * lead), *cs.shape)

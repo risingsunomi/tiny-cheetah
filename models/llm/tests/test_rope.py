@@ -11,7 +11,7 @@ class TestRotaryPositionalEmbedding(unittest.TestCase):
 
     def test_forward(self):
         x = tinygrad.Tensor.randn(1, 512, 64)
-        y = self.embedding.forward(x)
+        y = self.embedding(x)
         print(f"Output shape: {y.shape}")
         print(f"y: {y}")
         self.assertEqual(y.shape, (1, 512, 64))
