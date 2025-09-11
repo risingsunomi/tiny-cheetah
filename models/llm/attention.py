@@ -19,7 +19,9 @@ class MultiHeadAttention:
         attn_dropout: Optional[float] = 0.0,
         use_rope: Optional[bool] = True,
         rope_base: Optional[int] = 10000,
-        rope_scaling_opt: Optional[dict] = None
+        rope_scaling_opt: Optional[dict] = None,
+        use_norm_k: Optional[bool] = False,
+        use_norm_q: Optional[bool] = False
     ):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -49,7 +51,10 @@ class MultiHeadAttention:
                     max_seq_len,
                     rope_base
                 )
-        
+
+        self.k_norm = tg.nn.RMSNorm(embed_dim) if use_norm_k else None
+        self.q_norm = tg.nn.RMSNorm(embed_dim) if use_norm_q else None
+
         self.q_proj = tg.nn.Linear(embed_dim, num_heads * head_dim, bias=attn_bias)
         self.k_proj = tg.nn.Linear(embed_dim, num_kv_heads * head_dim, bias=attn_bias)
         self.v_proj = tg.nn.Linear(embed_dim, num_kv_heads * head_dim, bias=attn_bias)
@@ -82,6 +87,9 @@ class MultiHeadAttention:
         # q shape [batch, q_per_kv, x_seq_len, head_dim]
         q = q.transpose(1, 2)
 
+        if self.q_norm:
+            q = self.q_norm(q)
+
         if self.kv_cache is None:
             # initialize cache with max_seq_len capacity
             self.kv_cache = KVCache(self.max_seq_len)
@@ -101,6 +109,9 @@ class MultiHeadAttention:
         # k,v shape [batch, num_kv_heads, seq_len, head_dim]
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+
+        if self.k_norm:
+            k = self.k_norm(k)
 
         self.kv_cache.update(k, v)
 
