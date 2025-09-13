@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="tiny-cheetah",
+    name="tiny_cheetah",
     version="0.1",
     description="Distributed inference and training using tinygrad",
     packages=find_packages(),
@@ -9,6 +9,8 @@ setup(
         "tinygrad",
         "numpy",
         "textual",
-        "textual-dev"
+        "textual-dev",
+        "transformers",
+        "asyncio"
     ],
 )

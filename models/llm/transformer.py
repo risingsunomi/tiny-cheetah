@@ -9,6 +9,7 @@ class TransformerBlock:
         embed_dim,
         hidden_dim,
         num_heads,
+        num_kv_heads,
         head_dim,
         max_seq_len,
         hidden_act: str = "relu",
@@ -20,6 +21,7 @@ class TransformerBlock:
         self.attention = MultiHeadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_seq_len=max_seq_len
         )
