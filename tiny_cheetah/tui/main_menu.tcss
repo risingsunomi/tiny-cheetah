@@ -1,0 +1,14 @@
+Screen {
+    layout: vertical;
+    align: center middle;
+}
+
+#main-menu{
+    layout: horizontal;
+    align: center middle;
+}
+
+#menu-btns{
+    layout: horizontal;
+    align: center middle;
+}
