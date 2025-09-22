@@ -58,7 +58,7 @@ class MultiHeadAttention:
         self.q_proj = tg.nn.Linear(embed_dim, num_heads * head_dim, bias=attn_bias)
         self.k_proj = tg.nn.Linear(embed_dim, num_kv_heads * head_dim, bias=attn_bias)
         self.v_proj = tg.nn.Linear(embed_dim, num_kv_heads * head_dim, bias=attn_bias)
-        self.out_proj = tg.nn.Linear(embed_dim, embed_dim, bias=attn_bias)
+        self.o_proj = tg.nn.Linear(embed_dim, embed_dim, bias=attn_bias)
 
     def __call__(
         self,
@@ -130,4 +130,4 @@ class MultiHeadAttention:
         )
 
         attn_out = attn_out.transpose(1, 2).reshape(batch_size, x_seq_len, -1)
-        return self.out_proj(attn_out)
+        return self.o_proj(attn_out)

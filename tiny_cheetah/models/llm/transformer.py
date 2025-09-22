@@ -18,28 +18,28 @@ class TransformerBlock:
     ):
         self.input_layernorm = tg.nn.RMSNorm(embed_dim)
         self.mlp = MLP(embed_dim, hidden_dim, hidden_act)
-        self.attention = MultiHeadAttention(
+        self.self_attn = MultiHeadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_seq_len=max_seq_len
         )
-        self.post_attn_layernorm = tg.nn.RMSNorm(embed_dim)
+        self.post_attention_layernorm = tg.nn.RMSNorm(embed_dim)
 
         self.attn_scale = attn_scale
         self.mlp_scale = mlp_scale
 
     def __call__(self, x, mask=None):
         h = self.input_layernorm(x)
-        attn_out = self.attention(h, mask=mask)
+        attn_out = self.self_attn(h, mask=mask)
 
         if self.attn_scale:
             x = x + self.attn_scale(attn_out)
         else:
             x = x + attn_out
 
-        mlp_out = self.mlp(self.post_attn_layernorm(x))
+        mlp_out = self.mlp(self.post_attention_layernorm(x))
 
         if self.mlp_scale:
             out = h + self.mlp_scale(mlp_out)
