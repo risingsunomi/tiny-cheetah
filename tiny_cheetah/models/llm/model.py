@@ -47,10 +47,10 @@ class Model:
         x = self.embed_tokens(x)
         x = self.norm(x)
         
-        for layer in range(self.shard.start_layer, self.shard.end_layer):
-            x = layer(x)
-        
-        if not self.shard.end_layer == self.shard.n_layer-1:
+        for i in range(self.shard.start_layer, self.shard.end_layer):
+            x = self.layers[i](x)
+
+        if not self.shard.end_layer == self.shard.total_layers-1:
             x = self.output(x)
         
         return x
