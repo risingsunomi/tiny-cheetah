@@ -2,7 +2,7 @@
 Helpers for LLM models.
 """
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 import json
 
 import safetensors
@@ -16,6 +16,32 @@ from tiny_cheetah.models.llm.model import Model
 def permute(v: tg.Tensor, n_heads: int):
     return v.reshape(n_heads, 2, v.shape[0] // n_heads // 2, v.shape[1] if len(v.shape) > 1 else 1).transpose(1, 2).reshape(*v.shape[:2])
 
+def apply_weight(model_weight_key: str, key: str, weight_map, model_path, weight_device, model_state_dict, model_config):
+    weight_file = model_path / weight_map[model_weight_key]
+    weights = tg.nn.state.safe_load(str(weight_file))
+    weight = weights.get(model_weight_key)
+
+    if weight is None:
+        # print(f"!!! WARNING: {model_weight_key} not found in {weight_file}")
+        return
+
+    weight = weight.to(weight_device)
+
+    if tg.dtypes.bfloat16:
+        # bfloat16 fix for tinygrad. Need to research reasoning
+        # From https://github.com/tinygrad/tinygrad/blob/master/extra/models/llama.py#L251
+        weight = weight.cast(tg.dtypes.float32).cast(tg.dtypes.float16)
+    
+    if model_state_dict[key].shape != weight.shape:
+        return
+
+    if "q_proj" in key or "q_norm" in key:
+        weight = permute(weight, model_config["num_heads"])
+    elif "k_proj" in key or "k_norm" in key:
+        weight = permute(weight, model_config["num_kv_heads"])
+    
+    model_state_dict[key] = weight
+    
 # Load safetensor weights into model
 def load_safetensors(
         model: Model,
@@ -49,37 +75,37 @@ def load_safetensors(
         prefix = prefix_check + "."
     else:
         prefix = ""
-    
+
     for key in model_state_dict.keys():
         model_weight_key = prefix + key
-        if use_tied and model_weight_key in ["model.output.weight", "model.output.bias"]:
-            # print(f"!!! WARNING: tying weights for {model_weight_key}")
-            continue
-
         if model_weight_key not in weight_map.keys():
-            # print(f"!!! WARNING: {model_weight_key} not in weight map")
-            continue
+            if use_tied and key == "output.weight":
+                embed_weight_key = "model.embed_tokens.weight"
+                apply_weight(
+                    embed_weight_key,
+                    key,
+                    weight_map,
+                    model_path,
+                    weight_device,
+                    model_state_dict,
+                    model_config
+                )
 
-        weight_file = model_path / weight_map[model_weight_key]
-        weights = tg.nn.state.safe_load(str(weight_file))
-        weight = weights.get(model_weight_key)
-
-        if weight is None:
-            # print(f"!!! WARNING: {model_weight_key} not found in {weight_file}")
+                continue
+            
             continue
-        weight = weight.to(weight_device)
-        param = model_state_dict[key]
         
-        if param.shape != weight.shape:
-            # print(f"!!! WARNING: {key} shape mismatch, model: {param.shape}, weight: {weight.shape}")
-            continue
-
-        if "q_proj" in key or "q_norm" in key:
-            weight = permute(weight, model_config["num_heads"])
-        elif "k_proj" in key or "k_norm" in key:
-            weight = permute(weight, model_config["num_kv_heads"])
-        
-        param.assign(weight)
+        apply_weight(
+            model_weight_key,
+            key,
+            weight_map,
+            model_path,
+            weight_device,
+            model_state_dict,
+            model_config
+        )
+    
+    tg.nn.state.load_state_dict(model, model_state_dict)
 
 """
 LLM sampling

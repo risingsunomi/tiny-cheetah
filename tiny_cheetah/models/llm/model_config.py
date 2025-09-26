@@ -18,8 +18,6 @@ class ModelConfig:
         with open(config_file, "r") as f:
             base_config = json.loads(f.read())
 
-            print(f"Base config: {base_config}")
-
         HF_PRECISION_STR_TO_DTYPE = {
             "float16": dtypes.float16,
             "bfloat16": dtypes.bfloat16,

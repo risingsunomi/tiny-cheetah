@@ -42,8 +42,8 @@ class TransformerBlock:
         mlp_out = self.mlp(self.post_attention_layernorm(x))
 
         if self.mlp_scale:
-            out = h + self.mlp_scale(mlp_out)
+            out = x + self.mlp_scale(mlp_out)
         else:
-            out = h + mlp_out
+            out = x + mlp_out
         
         return out

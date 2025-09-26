@@ -15,8 +15,6 @@ class Model:
         self.shard = shard
 
         print(f"loading shard: {shard}")
-        print(f"model config: {self.config.model_config}")
-
 
         self.embed_tokens = tg.nn.Embedding(
             vocab_size=self.config["vocab_size"],
@@ -50,7 +48,7 @@ class Model:
         for i in range(self.shard.start_layer, self.shard.end_layer):
             x = self.layers[i](x)
 
-        if not self.shard.end_layer == self.shard.total_layers-1:
+        if self.shard.end_layer == self.shard.total_layers-1:
             x = self.output(x)
         
         return x

@@ -79,51 +79,46 @@ class MultiHeadAttention:
         q_per_kv = self.num_heads // self.num_kv_heads
         # Q should have num_heads heads; K/V may have fewer (GQA)
         q = q.reshape(batch_size, x_seq_len, self.num_heads, self.head_dim)
-
-        if self.use_rope:
-            # q embed shape the same as input
-            q = self.pos_embeddings(q, input_pos)
-
-        # q shape [batch, q_per_kv, x_seq_len, head_dim]
-        q = q.transpose(1, 2)
-
-        if self.q_norm:
-            q = self.q_norm(q)
-
-        if self.kv_cache is None:
-            # initialize cache with max_seq_len capacity
-            self.kv_cache = KVCache(self.max_seq_len)
-            self.kv_cache.cache_k = tg.Tensor.zeros((
-                batch_size, self.max_seq_len, self.head_dim
-            ))
-            self.kv_cache.cache_v = tg.Tensor.zeros((
-                batch_size, self.max_seq_len, self.head_dim
-            ))
-
         k = k.reshape(batch_size, x_seq_len, self.num_kv_heads, self.head_dim)
         v = v.reshape(batch_size, x_seq_len, self.num_kv_heads, self.head_dim)
 
         if self.use_rope:
+            q = self.pos_embeddings(q, input_pos)
             k = self.pos_embeddings(k, input_pos)
 
+        # q shape [batch, q_per_kv, x_seq_len, head_dim]
+        q = q.transpose(1, 2)
         # k,v shape [batch, num_kv_heads, seq_len, head_dim]
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if self.k_norm:
-            k = self.k_norm(k)
+        if self.q_norm: q = self.q_norm(q)
+        if self.k_norm: k = self.k_norm(k)
+
+        if self.kv_cache is None:
+            # initialize cache with max_seq_len capacity
+            self.kv_cache = KVCache(
+                self.max_seq_len,
+                batch_size,
+                self.num_kv_heads,
+                self.max_seq_len,
+                self.head_dim
+            )
+            
 
         self.kv_cache.update(k, v)
+        full_k = self.kv_cache.cache_k[:, :, :self.kv_cache.cache_pos, :].realize()
+        full_v = self.kv_cache.cache_v[:, :, :self.kv_cache.cache_pos, :].realize()
 
         if self.num_kv_heads != self.num_heads:
             expand_shape = (batch_size, self.num_kv_heads, q_per_kv, -1, self.head_dim)
-            k = k.reshape(*expand_shape).flatten(1, 2)
-            v = v.reshape(*expand_shape).flatten(1, 2)
+            full_k = full_k.reshape(*expand_shape).flatten(1, 2)
+            full_v = full_v.reshape(*expand_shape).flatten(1, 2)
 
         attn_out = tg.Tensor.scaled_dot_product_attention(
             q,
-            k,
-            v,
+            full_k,
+            full_v,
             attn_mask=mask,
             dropout_p=self.attn_dropout,
             is_causal=self.is_causal

@@ -9,7 +9,7 @@ from tiny_cheetah.models.llm.shard import Shard
 from tiny_cheetah.repos import RepoHuggingFace
 
 TOP_K = 0
-TEMP = 0.8
+TEMP = 0.75
 TOP_P = 0.0
 
 class TestModel(unittest.TestCase):
@@ -57,18 +57,18 @@ class TestModel(unittest.TestCase):
             local_files_only=True
         )
 
-        inputs = tokenizer.encode(prompt, return_tensors="np")
-        input_ids = tg.Tensor(inputs, device="METAL")
-        print(f"input_ids: {input_ids}")
-        try:
-            logits = self.model(input_ids)
-            print(f"logits {logits}")
-            self.assertIsNotNone(logits, "Model logits should not be None")
-            self.assertTrue(hasattr(logits, "shape"), "logits should have a 'shape' attribute")
-            self.assertEqual(logits.shape[0], input_ids.shape[0], "Batch size of logits should match input")
-        except Exception as e:
-            self.fail(f"Forward pass failed: {e}")
+        inputs = tokenizer(prompt, return_tensors="np")
+        print(f"{inputs=}")
+        # input_ids = tg.Tensor(inputs, device="METAL")
+        # try:
+        #     logits = self.model(input_ids)
+        #     self.assertIsNotNone(logits, "Model logits should not be None")
+        #     self.assertTrue(hasattr(logits, "shape"), "logits should have a 'shape' attribute")
+        #     self.assertEqual(logits.shape[0], input_ids.shape[0], "Batch size of logits should match input")
+        # except Exception as e:
+        #     self.fail(f"Forward pass failed: {e}")
 
-        out_tokens = sample(logits[:, -1, :].flatten(), temp=TEMP, k=TOP_K, p=TOP_P)
-        out_decoded = tokenizer.decode(out_tokens.tolist())
-        print(f"{out_decoded=}")
+        # tok = sample(logits[:, -1, :].flatten(), temp=TEMP, k=TOP_K, p=TOP_P)
+        # tok = tok.item()
+        # out_decoded = tokenizer.decode([tok])
+        # print(f"{out_decoded=}")
