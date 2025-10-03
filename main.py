@@ -1,5 +1,5 @@
 # tiny-cheetah distributed AI
-from tui import main_menu
+from tiny_cheetah.tui import main_menu
 
 def main():
     main_menu.MainMenu().run()
