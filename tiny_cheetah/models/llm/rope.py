@@ -1,7 +1,18 @@
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
-import tinygrad
+import tinygrad as tg
+
+# From https://github.com/tinygrad/tinygrad/blob/master/extra/models/llama.py
+# From https://github.com/BatSmacker84/exo/blob/fbec1d2b10ccf3a804294c0742b69d508f7b5fb8/exo/inference/tinygrad/models/llama.py
+def complex_multi(A: tg.Tensor, C: tg.Tensor, D: tg.Tensor) -> tg.Tensor:
+  """
+  real and imaginary complex multiplication
+  """
+  a,b = A[..., 0:1], A[..., 1:2]
+  ro = a*C - b*D
+  co = a*D + b*C
+  return ro.cat(co, dim=-1)
 
 class RotaryPositionalEmbedding:
     """
@@ -12,95 +23,140 @@ class RotaryPositionalEmbedding:
         self,
         dim: int,
         max_seq_len: int,
-        base: int = 100000,
+        theta: float = 100000.0,
         is_scaling: bool = False,
         scale_factor: float = 8.0,
-        low_freq_factor: int = 1,
-        high_freq_factor: int = 1,
-        old_context_len: int = 8192
+        low_freq_factor: float = 1.0,
+        high_freq_factor: float = 1.0,
+        old_context_len: int = 8192,
+        dtype = tg.dtypes.half
     ):
         self.dim = dim
         self.max_seq_len = max_seq_len
-        self.base = base
+        self.theta = theta
         self.is_scaling = is_scaling
         self.low_freq_factor = low_freq_factor
         self.high_freq_factor = high_freq_factor
         self.old_context_len = old_context_len
         self.scale_factor = scale_factor
         self.cache = None
+        self.dtype = dtype
 
-        self.theta = 1.0 / (self.base ** (
-            tinygrad.Tensor.arange(
+        # precompute freqs
+        self.freqs = 1.0 / (self.theta ** (
+            tg.Tensor.arange(
                 0,
                 self.dim,
                 2
-            )[: (self.dim//2)].float() / self.dim
+            )[: (self.dim//2)] / self.dim
         ))
+    
         if self.is_scaling:
-            self.theta = self.apply_scaling(self.theta)
+            self.freqs = self.apply_scaling(self.freqs)
 
-    def build_rope_cache(self) -> tinygrad.Tensor:
-        seq_idx = tinygrad.Tensor.arange(self.max_seq_len)
-        idx_theta = tinygrad.Tensor.einsum(
-            "i, j -> ij", seq_idx, self.theta).float()
-        self.cache = tinygrad.Tensor.stack([
-            tinygrad.Tensor.cos(idx_theta),
-            tinygrad.Tensor.sin(idx_theta)
+        end = self.max_seq_len * 2
+        self.freqs = tg.Tensor.arange(end).unsqueeze(dim=1) * self.freqs.unsqueeze(dim=0)
+        self.freqs = tg.Tensor.stack(
+            self.freqs.cos().cast(self.dtype),
+            self.freqs.sin().cast(self.dtype), 
+            dim=-1
+        ).reshape(
+            1,
+            end,
+            1,
+            self.dim//2,
+            2
+        )
+
+    # def build_rope_cache(self) -> tg.Tensor:
+    #     seq_idx = tg.Tensor.arange(self.max_seq_len)
+    #     idx_theta = tg.Tensor.einsum(
+    #         "i, j -> ij", seq_idx, self.theta).float()
+    #     self.cache = tg.Tensor.stack([
+    #         tg.Tensor.cos(idx_theta),
+    #         tg.Tensor.sin(idx_theta)
+    #     ], dim=-1)
+
+    def build_rope_cache(self, device) -> tg.Tensor:
+        half = self.dim // 2
+        self.theta = (1.0 / (self.base ** (
+            tg.Tensor.arange(0, self.dim, 2, device=device).float() / self.dim
+        )))[:half].float()
+        seq_idx = tg.Tensor.arange(self.max_seq_len, device=device).float()
+        idx_theta = tg.Tensor.einsum("s,d->sd", seq_idx, self.theta).float()
+        self.cache = tg.Tensor.stack([
+            idx_theta.cos(),
+            idx_theta.sin()
         ], dim=-1)
 
     def apply_scaling(
         self,
-        freqs: tinygrad.Tensor
-    ) -> tinygrad.Tensor:
-        low_freq_wavelen = self.old_context_len / self.low_freq_factor
-        high_freq_wavelen = self.old_context_len / self.high_freq_factor
-        new_freqs = []
-        for freq in freqs:
-            wavelen = 2 * math.pi / freq
-            if wavelen < high_freq_wavelen:
-                new_freqs.append(freq)
-            elif wavelen > low_freq_wavelen:
-                new_freqs.append(freq / self.scale_factor)
-            else:
-                assert low_freq_wavelen != high_freq_wavelen
-                smooth = (
-                    self.old_context_len / wavelen - self.low_freq_factor
-                ) / (
-                    self.high_freq_factor - self.low_freq_factor
-                )
+        freqs: tg.Tensor
+    ) -> tg.Tensor:
+        """
+        Applies frequency scaling (e.g., YaRN-like) to the input frequency vector.
+        Returns a tensor of the same shape as `freqs`.
+        """
+        # guard defaults if optional values are None
+        low = 1.0 if (self.low_freq_factor is None) else float(self.low_freq_factor)
+        high = 1.0 if (self.high_freq_factor is None) else float(self.high_freq_factor)
+        # if old_context_len is not provided, don't change frequencies with this term
+        if self.old_context_len is None or self.scale_factor is None:
+            m = 1.0
+        else:
+            m = float(self.old_context_len) / float(self.max_seq_len)
+            m = m ** (1.0 / float(self.scale_factor))
 
-                new_freqs.append(
-                    (1 - smooth) * freq /  self.scale_factor + smooth * freq
-                )
-
-        return tinygrad.Tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+        # make a copy to avoid in-place on shared tensors
+        out = (freqs * m).contiguous()
+        # split low/high frequency bands roughly in half of the freqs (i.e., D/4 boundary for D/2 freqs)
+        split_idx = self.dim // 4
+        if split_idx > 0:
+            out[:split_idx] = out[:split_idx] * low
+            out[split_idx:] = out[split_idx:] * high
+        else:
+            out = out * high
+        return out
 
     def __call__(
         self,
-        x: tinygrad.Tensor,
-        input_pos: Optional[tinygrad.Tensor]
-    ) -> tinygrad.Tensor:
-        if self.cache is None:
-            self.build_rope_cache()
+        q: tg.Tensor, # [B, S, Hq, D]
+        k: tg.Tensor, # [B, S, Hk, D]
+        position_ids: Optional[tg.Tensor] = None
+    ) -> Tuple[tg.Tensor, tg.Tensor]:
+        # if self.cache is None:
+        #     self.build_rope_cache(q.device)
 
-        assert x.shape[-1] == self.dim, "Last dim must equal RoPE dim"
-        assert self.dim % 2 == 0, "RoPE dim must be even"
+        """
+        Returns rotated (q,k). Handles position_ids as [S], [B,S], or None.
+        """
+        B, S, Hq, D = q.shape
+        _, _, Hk, Dk = k.shape
+        assert D % 2 == 0 and Dk == D, "q/k head dims must match and be even"
 
-        seq_len = x.shape[-2]
-        cs = self.cache[:seq_len] if input_pos is None else self.cache[input_pos]
-        x_pairs = x.float().reshape(*x.shape[:-1], -1, 2)
-        lead = x_pairs.ndim - cs.ndim
-        if lead > 0:
-            cs = cs.reshape(*((1,) * lead), *cs.shape)
+        # positions -> [S]
+        if position_ids is None:
+            pos = tg.Tensor.arange(S, device=q.device)
+        else:
+            pos = position_ids
+            if pos.ndim == 2:  # [B,S] -> take row 0 (RoPE equal across batch)
+                pos = pos[0]
+            elif pos.ndim == 0:
+                pos = pos.reshape(1)
 
-        cos = cs[..., 0]
-        sin = cs[..., 1]
+        # reshape into complex pairs
+        q_pairs = q.reshape(B, S, Hq, D // 2, 2).float()
+        k_pairs = k.reshape(B, S, Hk, D // 2, 2).float()
 
-        x0 = x_pairs[..., 0]
-        x1 = x_pairs[..., 1]
-        y0 = x0 * cos - x1 * sin
-        y1 = x0 * sin + x1 * cos
+        # select cos/sin for the provided positions and move to the correct device
+        # self.freqs shape: [1, 2*max_seq_len, 1, D/2, 2]
+        table = self.freqs.to(q.device)
+        cs = table[:, pos.cast(tg.dtypes.default_int), :, :, :]  # [1, S, 1, D/2, 2]
 
-        y_pairs = tinygrad.Tensor.stack([y0, y1], dim=-1)
-        y = y_pairs.reshape(*x.shape)
-        return y.cast(x.dtype)
+        # split into cos/sin and apply rotation via complex multiply
+        C, D_ = cs[..., 0:1], cs[..., 1:2]                      # [1, S, 1, D/2, 1]
+        q_out = complex_multi(q_pairs, C, D_)                   # [B, S, Hq, D/2, 2]
+        k_out = complex_multi(k_pairs, C, D_)                   # [B, S, Hk, D/2, 2]
+
+        # flatten back to last dim and cast to original dtype
+        return q_out.flatten(3).cast(q.dtype), k_out.flatten(3).cast(k.dtype)
