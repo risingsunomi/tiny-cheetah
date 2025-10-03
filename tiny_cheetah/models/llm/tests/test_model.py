@@ -4,32 +4,92 @@ import transformers as hf_transformers
 import tinygrad as tg
 
 from tiny_cheetah.models.llm.model import Model
-from tiny_cheetah.models.llm.helpers import load_safetensors
+from tiny_cheetah.models.llm.helpers import load_safetensors, sample, generate
 from tiny_cheetah.models.llm.shard import Shard
 from tiny_cheetah.repos import RepoHuggingFace
 
-class TestModel(unittest.TestCase):
-   def setUp(self):
-       test_model = "unsloth/Llama-3.2-1B-Instruct"
-       repo = RepoHuggingFace(test_model)
-       self.model_path, self.model_config = repo.download()
-       shard = Shard(
-           test_model,
-           start_layer=0,
-           end_layer=self.model_config["num_layers"],
-           total_layers=self.model_config["num_layers"],
-       )
-       self.model = Model(self.model_config, shard)
+TOP_K = 0
+TEMP = 0.65
+TOP_P = 0.0
+ALPHA_F = 0.0
+ALPHA_P = 0.0
 
-   def test_llama32_1B_load_weights_apple(self):
-        try:
-            load_safetensors(
-                self.model,
-                self.model_path,
-                weight_device="METAL",
-                use_tied=True
-            )
-        except Exception as e:
-            self.fail(f"Loading weights failed: {e}")
+class TestModel(unittest.TestCase):
+    def setUp(self):
+        # self.test_model = "meta-llama/Llama-3.2-1B"
+        self.test_model = "unsloth/Llama-3.2-1B-Instruct"
+        repo = RepoHuggingFace(self.test_model)
+        self.model_path, self.model_config = repo.download()
+        shard = Shard(
+            self.test_model,
+            start_layer=0,
+            end_layer=self.model_config["num_layers"],
+            total_layers=self.model_config["num_layers"]+1,
+        )
+        self.model = Model(self.model_config, shard)
+        load_safetensors(
+            self.model,
+            self.model_path,
+            self.model_config,
+            weight_device="METAL",   # or "CUDA"/"CPU"
+            use_tied=True
+        )
+
+        self.tokenizer = hf_transformers.AutoTokenizer.from_pretrained(
+            self.test_model, local_files_only=True
+        )
+
+    def test_llama32_1B_generate_eos_apple(self):
+        # messages = [{"role": "user", "content": "Answer in one word: What is the capital of France?"}]
+        # temp_chat = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        # print(f"temp_chat: {temp_chat}")
+        # enc = self.tokenizer(temp_chat, return_tensors="np")
+        # print(f"enc: {enc}")
+
+        # input_ids = tg.Tensor(enc["input_ids"]).to("METAL")
+        # attention_mask = tg.Tensor(enc["attention_mask"]).to("METAL")
+        # eos_id = self.tokenizer.eos_token_id
+        # # print(f"eos_id: {eos_id}")
+
+        # # run generation (prints tok/s when EOS or max tokens hit)
+        # max_new = 10
+        # generate(
+        #     model=self.model,
+        #     input_ids=input_ids,
+        #     attention_mask=attention_mask,
+        #     tokenizer=self.tokenizer,
+        #     max_new_tokens=max_new,
+        #     temp=TEMP,
+        #     top_k=TOP_K,
+        #     top_p=TOP_P,
+        #     alpha_f=ALPHA_F,
+        #     alpha_p=ALPHA_P,
+        # )
+        user_prompt = "Tell me a funny short story"
+        messages = [{"role": "user", "content": user_prompt}]
+        temp_chat = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        enc = self.tokenizer(temp_chat, return_tensors="np")
+
+        input_ids = tg.Tensor(enc["input_ids"]).to("METAL")
+        attention_mask = tg.Tensor(enc["attention_mask"]).to("METAL")
         
-        self.assertTrue(True, "Weights loaded successfully")
+       
+
+        # run generation (prints tok/s when EOS or max tokens hit)
+        max_new = 1000
+        out_tokens = generate(
+            model=self.model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            tokenizer=self.tokenizer,
+            max_new_tokens=max_new,
+            temp=TEMP,
+            top_k=TOP_K,
+            top_p=TOP_P,
+            alpha_f=ALPHA_F,
+            alpha_p=ALPHA_P,
+        )
+
+        model_reply = self.tokenizer.decode(out_tokens, skip_special_tokens=True)
+        print(f"[User]: {user_prompt}")
+        print(f"[Model]: {model_reply}")
