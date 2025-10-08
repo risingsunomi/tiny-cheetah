@@ -25,4 +25,8 @@ class RepoHuggingFace:
                 print(f"Loading config from {file}")
                 self.model_config.load(file)
 
+            if path.name == "generation_config.json":
+                print(f"Loading generation config from {file}")
+                self.model_config.load_generation_config(Path(file))
+
         return Path(model_data), self.model_config

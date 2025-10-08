@@ -20,7 +20,16 @@ from tiny_cheetah.repos import RepoHuggingFace
 def permute(v: tg.Tensor, n_heads: int):
     return v.reshape(n_heads, 2, v.shape[0] // n_heads // 2, v.shape[1] if len(v.shape) > 1 else 1).transpose(1, 2).reshape(*v.shape[:2])
 
-def apply_weight(model_weight_key: str, key: str, weight_map, model_path, weight_device, model_state_dict, model_config):
+def apply_weight(
+    model_weight_key: str,
+    key: str,
+    weight_map,
+    model_path,
+    weight_device,
+    model_state_dict,
+    model_config
+):
+    
     weight_file = model_path / weight_map[model_weight_key]
     weights = tg.nn.state.safe_load(str(weight_file))
     weight = weights.get(model_weight_key)
@@ -35,13 +44,10 @@ def apply_weight(model_weight_key: str, key: str, weight_map, model_path, weight
         # bfloat16 fix for tinygrad. Need to research reasoning
         # From https://github.com/tinygrad/tinygrad/blob/master/extra/models/llama.py#L251
         weight = weight.cast(tg.dtypes.float32).cast(tg.dtypes.float16)
-    
-    if model_state_dict[key].shape != weight.shape:
-        return
 
-    if "q_proj" in key or "q_norm" in key:
+    if "q_proj" in key:
         weight = permute(weight, model_config["num_heads"])
-    elif "k_proj" in key or "k_norm" in key:
+    elif "k_proj" in key:
         weight = permute(weight, model_config["num_kv_heads"])
     
     model_state_dict[key] = weight
@@ -69,13 +75,13 @@ def load_safetensors(
     else:
         # get weightmap from safetensor
         # this is usually when the model only has one weight
-        weight_data = safetensors.safe_open(str(model_files[0]), framework="numpy")
-        for key in weight_data.keys():
-            weight_map[key] = model_files[0].name
+        with safetensors.safe_open(str(model_files[0]), framework="numpy") as weight_data:
+            for key in weight_data.keys():
+                weight_map[key] = model_files[0].name
 
     model_state_dict = tg.nn.state.get_state_dict(model)
-    prefix_check = next(iter(weight_map.keys())).split(".")[0]
-    if prefix_check in ["model", "base_model", "transformer", "gpt_neox"]:
+    prefix_check = list(weight_map.keys())[1].split(".")[0]
+    if prefix_check in ["model", "base_model", "transformer", "gpt_neox", "blk"]:
         prefix = prefix_check + "."
     else:
         prefix = ""
@@ -96,9 +102,21 @@ def load_safetensors(
                 )
 
                 continue
-            
+            elif "lm_head.weight" in weight_map.keys() and key == "output.weight":
+                apply_weight(
+                    "lm_head.weight",
+                    key,
+                    weight_map,
+                    model_path,
+                    weight_device,
+                    model_state_dict,
+                    model_config
+                )
+
+                continue
+
             continue
-        
+
         apply_weight(
             model_weight_key,
             key,
@@ -234,29 +252,39 @@ def generate(
 
     # first token sampled; appended to out_tokens above
 
-    while generated < max_new_tokens-1:
+    limit = max_new_tokens - 1 if max_new_tokens > 0 else None
+
+    while True:
         if tok == tokenizer.eos_token_id:
             elapsed = time.time() - t0
             tok_s = generated / elapsed if elapsed > 0 else float("inf")
             print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")
             eos_hit = True
             break
-        
+
+        if limit is not None and generated >= limit:
+            break
+
         generated += 1
 
-        next_tok = tg.Tensor([[tok]], device=device) # [B, 1]
+        next_tok = tg.Tensor([[tok]], device=device)  # [B, 1]
         # grow attention mask and use absolute position for the new token
-        attention_mask = attention_mask.cat(tg.Tensor.ones((attention_mask.shape[0], 1), device=device), dim=1)
+        attention_mask = attention_mask.cat(
+            tg.Tensor.ones((attention_mask.shape[0], 1), device=device), dim=1
+        )
         position_ids = tg.Tensor([curr_pos], device=device)
 
         if verbose:
-            print(f"next_tok: {[next_tok.item()]}\n position_ids: {position_ids.tolist()}\n attention_mask_len: {attention_mask.shape[1]}")
+            print(
+                f"next_tok: {[next_tok.item()]}\n position_ids: {position_ids.tolist()}\n attention_mask_len: {attention_mask.shape[1]}"
+            )
+
         logits = model(
             next_tok,
             attention_mask=attention_mask,
             position_ids=position_ids
         )
-        next_logit = logits[:, -1, :].flatten() # [B, V]
+        next_logit = logits[:, -1, :].flatten()  # [B, V]
         tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
         tok = tok.item()
         out_tokens.append(tok)
