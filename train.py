@@ -12,9 +12,13 @@ import argparse
 import json
 import math
 import os
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
+
+SPIN_LOOP = ["|", "/", "-", "\\"]
 
 import numpy as np
 import tinygrad as tg
@@ -35,8 +39,15 @@ class Batch:
     """
     input_ids: tg.Tensor
     labels: tg.Tensor
-    attention_mask: tg.Tensor
+    attention_mask: Optional[tg.Tensor]
     position_ids: tg.Tensor
+
+
+def cross_entropy_loss(logits: tg.Tensor, targets: tg.Tensor) -> tg.Tensor:
+    """Compute mean cross-entropy loss for logits and integer targets."""
+    log_probs = logits.log_softmax(axis=-1)
+    gathered = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    return (-gathered).mean()
 
 
 def parse_args() -> argparse.Namespace:
@@ -400,67 +411,67 @@ def resolve_tokenizer_asset(
     return None
 
 
-def tokenize_corpus(
+def stream_corpus_batches(
     tokenizer: AutoTokenizer,
     data_path: Path,
-    seq_length: int
-) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """
-    Convert the flat text corpus into aligned (input, target) sequences of
-    length `seq_length`. Targets are the next-token shift of inputs.
-    """
-    print(f"[tokenizer] processing corpus at {data_path} with seq-length={seq_length}")
-    text = data_path.read_text(encoding="utf-8")
-    encoded = tokenizer(
-        text,
-        add_special_tokens=False,
-        return_attention_mask=False
-    )
-    ids = encoded["input_ids"]
-
-    sequences: List[Tuple[np.ndarray, np.ndarray]] = []
-    stride = seq_length
-    window = seq_length + 1
-    total_chunks = (len(ids) + stride - 1) // stride
-    for start in range(0, len(ids) - window, stride):
-        chunk = ids[start:start + window]
-        print(f"Tokenizing chunk {len(sequences)+1}/{total_chunks}", end='\r')
-        if len(chunk) < window:
-            break
-        inputs = np.asarray(chunk[:-1], dtype=np.int32)
-        targets = np.asarray(chunk[1:], dtype=np.int32)
-        sequences.append((inputs, targets))
-
-    return sequences
-
-
-def batches_from_sequences(
-    sequences: Sequence[Tuple[np.ndarray, np.ndarray]],
+    seq_length: int,
     batch_size: int,
-    device: str
-) -> Iterable[Batch]:
-    """
-    Yield mini-batches constructed from the prepared token sequences.
-    """
-    for start in range(0, len(sequences), batch_size):
-        slice_ = sequences[start:start + batch_size]
-        if len(slice_) < batch_size:
-            return
+    device: str,
+    max_sequences: Optional[int] = None
+) -> Iterator[Batch]:
+    """Yield mini-batches by streaming tokens directly from the corpus file."""
+    print(f"[data] tokenizing corpus from {data_path} with seq_length={seq_length}, batch_size={batch_size}")
+    
+    if not data_path.exists():
+        raise FileNotFoundError(f"Corpus file {data_path} not found")
 
-        inputs = np.stack([inp for inp, _ in slice_])
-        targets = np.stack([tgt for _, tgt in slice_])
-        attention_mask = np.ones_like(inputs, dtype=np.float32)
-        position_ids = np.tile(
-            np.arange(inputs.shape[1], dtype=np.int32),
-            (inputs.shape[0], 1)
-        )
+    token_buffer: List[int] = []
+    seq_inputs: List[List[int]] = []
+    seq_targets: List[List[int]] = []
+    total_sequences = 0
 
-        yield Batch(
-            input_ids=tg.Tensor(inputs, device=device, dtype=tg.dtypes.int32),
-            labels=tg.Tensor(targets, device=device, dtype=tg.dtypes.int32),
-            attention_mask=tg.Tensor(attention_mask, device=device),
-            position_ids=tg.Tensor(position_ids, device=device, dtype=tg.dtypes.int32)
+    def flush_batch() -> Batch:
+        nonlocal seq_inputs, seq_targets
+        input_arr = np.asarray(seq_inputs, dtype=np.int32)
+        target_arr = np.asarray(seq_targets, dtype=np.int32)
+        position_arr = np.tile(
+            np.arange(seq_length, dtype=np.int32),
+            (input_arr.shape[0], 1)
         )
+        batch = Batch(
+            input_ids=tg.Tensor(input_arr, device=device, dtype=tg.dtypes.int32),
+            labels=tg.Tensor(target_arr, device=device, dtype=tg.dtypes.int32),
+            attention_mask=None,
+            position_ids=tg.Tensor(position_arr, device=device, dtype=tg.dtypes.int32)
+        )
+        seq_inputs, seq_targets = [], []
+        return batch
+
+    with data_path.open("r", encoding="utf-8") as corpus:
+        for line in corpus:
+            tokens = tokenizer.encode(line, add_special_tokens=False)
+            if not tokens:
+                continue
+            token_buffer.extend(tokens)
+
+            while len(token_buffer) >= seq_length + 1:
+                window = token_buffer[:seq_length + 1]
+                seq_inputs.append(window[:-1])
+                seq_targets.append(window[1:])
+                total_sequences += 1
+                del token_buffer[:seq_length]
+
+                if len(seq_inputs) == batch_size:
+                    yield flush_batch()
+
+                if max_sequences is not None and total_sequences >= max_sequences:
+                    break
+
+            if max_sequences is not None and total_sequences >= max_sequences:
+                break
+       
+    if seq_inputs:
+        yield flush_batch()
 
 
 def save_checkpoint(model: Model, save_dir: Path, step: int) -> None:
@@ -473,8 +484,7 @@ def save_checkpoint(model: Model, save_dir: Path, step: int) -> None:
 
 def train_epoch(
     model: Model,
-    optimizer: tg.optim.Optimizer,
-    criterion: tg.nn.loss.CrossEntropyLoss,
+    optimizer: tg.nn.optim.Optimizer,
     batches: Iterable[Batch],
     grad_accum: int
 ) -> float:
@@ -485,36 +495,79 @@ def train_epoch(
     step_loss = 0.0
     steps = 0
     optimizer.zero_grad()
+    orig_training_flag = tg.Tensor.training
+    tg.Tensor.training = True
+    start_time = time.time()
+    last_display = start_time
+    total_tokens = 0
 
-    for step, batch in enumerate(batches, start=1):
-        logits = model(
-            batch.input_ids,
-            attention_mask=batch.attention_mask,
-            position_ids=batch.position_ids
-        )
-        vocab_size = logits.shape[-1]
-        logits = logits.reshape(-1, vocab_size)
-        labels = batch.labels.reshape(-1).cast(tg.dtypes.default_int)
+    try:
+        for step, batch in enumerate(batches, start=1):
+            logits = model(
+                batch.input_ids,
+                attention_mask=batch.attention_mask,
+                position_ids=batch.position_ids
+            )
+            vocab_size = logits.shape[-1]
+            logits = logits.reshape(-1, vocab_size)
+            labels = batch.labels.reshape(-1).cast(tg.dtypes.default_int)
 
-        loss = criterion(logits, labels)
-        loss.backward()
-        step_loss += loss.item()
+            loss = cross_entropy_loss(logits, labels)
+            loss.backward()
+            step_loss += loss.item()
 
-        if step % grad_accum == 0:
+            seq_tokens = batch.input_ids.shape[0] * batch.input_ids.shape[1]
+            total_tokens += seq_tokens
+            now = time.time()
+            if now - last_display >= 0.5:
+                spinner = SPIN_LOOP[step % len(SPIN_LOOP)]
+                elapsed = max(now - start_time, 1e-6)
+                tok_rate = total_tokens / elapsed
+                sys.stdout.write(
+                    f"\r[train] {spinner} step={step} loss={loss.item():.4f} total_tok={total_tokens} tok/s={tok_rate:.1f}"
+                )
+                sys.stdout.flush()
+                last_display = now
+
+            if step % grad_accum == 0:
+                missing_grads = [p for p in optimizer.params if p.grad is None]
+                for tensor in missing_grads:
+                    tensor.grad = tg.Tensor.zeros_like(tensor)
+                optimizer.step()
+                optimizer.zero_grad()
+
+            steps += 1
+            model_loss += loss.item()
+
+            if step % 10 == 0:
+                avg = step_loss / min(step, 10)
+                elapsed = max(time.time() - start_time, 1e-6)
+                tok_rate = total_tokens / elapsed
+                print(
+                    f"\r[train] ✓ step={step} loss={avg:.4f} total_tok={total_tokens} tok/s={tok_rate:.1f}           "
+                )
+                step_loss = 0.0
+
+        if steps == 0:
+            return math.nan
+
+        # Handle leftover gradients when grad_accum does not divide steps
+        if steps % grad_accum != 0:
+            missing_grads = [p for p in optimizer.params if p.grad is None]
+            for tensor in missing_grads:
+                tensor.grad = tg.Tensor.zeros_like(tensor)
             optimizer.step()
             optimizer.zero_grad()
 
-        steps += 1
-        model_loss += loss.item()
-
-        if step % 10 == 0:
-            avg = step_loss / min(step, 10)
-            print(f"[train] step={step} loss={avg:.4f}")
-            step_loss = 0.0
-
-    if steps == 0:
-        return math.nan
-    return model_loss / steps
+        # final display
+        elapsed = max(time.time() - start_time, 1e-6)
+        tok_rate = total_tokens / elapsed
+        print(
+            f"\r[train] done steps={steps} mean_loss={model_loss / steps:.4f} total_tok={total_tokens} tok/s={tok_rate:.1f}          "
+        )
+        return model_loss / steps
+    finally:
+        tg.Tensor.training = orig_training_flag
 
 
 def main() -> None:
@@ -661,18 +714,24 @@ def main() -> None:
         )
         print(f"[dataset] Using processed corpus at {data_path}")
 
-    sequences = tokenize_corpus(tokenizer, data_path, args.seq_length)
-    if not sequences:
-        raise RuntimeError("Dataset is empty after tokenization; check seq-length or data.")
-
-    optimizer = tg.optim.Adam(get_parameters(model), lr=args.lr)
-    criterion = tg.nn.CrossEntropyLoss()
+    parameters = [param.requires_grad_(True) for param in get_parameters(model)]
+    optimizer = tg.nn.optim.Adam(parameters, lr=args.lr)
 
     global_step = 0
     for epoch in range(1, args.epochs + 1):
         print(f"\n=== Epoch {epoch}/{args.epochs} ===")
-        batches = batches_from_sequences(sequences, args.batch_size, args.device)
-        avg_loss = train_epoch(model, optimizer, criterion, batches, args.gradient_accumulation)
+        batches = stream_corpus_batches(
+            tokenizer=tokenizer,
+            data_path=data_path,
+            seq_length=args.seq_length,
+            batch_size=args.batch_size,
+            device=args.device
+        )
+        avg_loss = train_epoch(model, optimizer, batches, args.gradient_accumulation)
+        if math.isnan(avg_loss):
+            raise RuntimeError(
+                "No training batches were produced. Check dataset size, sequence length, or batch size."
+            )
         print(f"[epoch] {epoch} mean loss = {avg_loss:.4f}")
 
         if args.save_dir is not None:

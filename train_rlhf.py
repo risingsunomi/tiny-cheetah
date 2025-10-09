@@ -13,6 +13,8 @@ import argparse
 import json
 import os
 import runpy
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
@@ -30,6 +32,7 @@ from tiny_cheetah.repos import RepoHuggingFace
 
 
 RewardFn = Callable[[str, str], float]
+SPIN_LOOP = ["|", "/", "-", "\\"]
 
 
 @dataclass
@@ -78,14 +81,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompts-path",
         type=Path,
-        required=True,
-        help="Text or JSONL file of prompts used for rollouts."
+        default=None,
+        help="Text or JSONL file of prompts used for rollouts. If omitted, provide --dataset-id."
     )
     parser.add_argument(
         "--reward-script",
         type=Path,
         default=None,
         help="Path to a Python file exposing `score(prompt, response) -> float`."
+    )
+    parser.add_argument(
+        "--dataset-id",
+        type=str,
+        default=None,
+        help="Optional Hugging Face dataset identifier (e.g. NousResearch/Hermes-3-Dataset)."
+    )
+    parser.add_argument(
+        "--dataset-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional directory to cache downloaded/processed datasets."
+    )
+    parser.add_argument(
+        "--max-dataset-entries",
+        type=int,
+        default=None,
+        help="Optional cap on the number of prompts extracted from the dataset."
     )
     parser.add_argument(
         "--device",
@@ -158,6 +179,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip loading weights and start from random parameters."
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Only use locally cached Hugging Face files (no network)."
+    )
     return parser.parse_args()
 
 
@@ -173,12 +199,189 @@ def ensure_required_keys(config_obj) -> None:
     backing.setdefault("top_p", None)
 
 
+def parse_remote_identifier(identifier: Path, default_filename: str) -> tuple[str, str]:
+    raw = identifier.as_posix().strip()
+    raw = raw.lstrip("./")
+    if not raw or raw.startswith("/"):
+        raise FileNotFoundError(f"Invalid remote identifier: {identifier}")
+
+    if raw.endswith(".json"):
+        repo_id, _, filename = raw.rpartition("/")
+        if not repo_id:
+            raise FileNotFoundError(
+                f"Remote identifier '{raw}' must include repo id before the filename."
+            )
+        return repo_id, filename
+
+    return raw, default_filename
+
+
+def fetch_model_file(
+    repo_id: str,
+    filename: str,
+    cache_dir: Optional[Path] = None,
+    local_only: bool = False
+) -> Path:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise ImportError(
+            "huggingface_hub is required to download config files. Install it with `pip install huggingface_hub`."
+        ) from exc
+
+    kwargs = {"repo_id": repo_id, "filename": filename, "repo_type": "model"}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
+    if local_only:
+        kwargs["local_files_only"] = True
+
+    try:
+        local_path = hf_hub_download(**kwargs)
+        return Path(local_path)
+    except Exception as err:
+        if local_only:
+            raise FileNotFoundError(
+                f"File '{filename}' not found in local cache for repo '{repo_id}'."
+            ) from err
+        print(
+            f"[config] Direct download failed for {repo_id}/{filename}: {err}. Falling back to RepoHuggingFace snapshot."
+        )
+        repo = RepoHuggingFace(repo_id)
+        snapshot_path, _ = repo.download()
+        candidate = snapshot_path / filename
+        if candidate.exists():
+            return candidate
+
+        matches = list(snapshot_path.rglob(filename))
+        if matches:
+            return matches[0]
+
+        raise FileNotFoundError(
+            f"Unable to locate {filename} in repo {repo_id} after snapshot download."
+        ) from err
+
+
+def download_dataset(dataset_id: str, cache_dir: Optional[Path] = None, local_only: bool = False) -> Path:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ImportError(
+            "huggingface_hub is required to download datasets. Install it with `pip install huggingface_hub`."
+        ) from exc
+
+    kwargs = {"repo_id": dataset_id, "repo_type": "dataset"}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
+    if local_only:
+        kwargs["local_files_only"] = True
+    path = snapshot_download(**kwargs)
+    return Path(path)
+
+
+def _conversation_to_prompt(record: dict) -> Optional[str]:
+    messages = record.get("conversations") or record.get("messages") or record.get("turns")
+    if not messages:
+        return None
+
+    first = messages[0]
+    if isinstance(first, dict):
+        content = first.get("value") or first.get("content") or ""
+    else:
+        content = str(first)
+    content = content.strip()
+    return content or None
+
+
+def iter_dataset_prompts(dataset_root: Path, limit: Optional[int] = None) -> Iterator[str]:
+    emitted = 0
+
+    def accept(prompt: Optional[str]) -> bool:
+        nonlocal emitted
+        if prompt is None:
+            return False
+        if limit is not None and emitted >= limit:
+            return False
+        emitted += 1
+        return True
+
+    jsonl_files = sorted(dataset_root.rglob("*.jsonl"))
+    json_files = sorted(
+        path for path in dataset_root.rglob("*.json")
+        if path.name not in {"dataset_info.json", "info.json"}
+    )
+
+    for path in jsonl_files:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                prompt = record.get("prompt") or _conversation_to_prompt(record)
+                if accept(prompt):
+                    yield prompt
+                    if limit is not None and emitted >= limit:
+                        return
+
+    for path in json_files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(data, dict):
+            maybe = data.get("data") or data.get("examples") or data.get("conversations")
+            if isinstance(maybe, list):
+                data = maybe
+        if not isinstance(data, list):
+            continue
+
+        for record in data:
+            if not isinstance(record, dict):
+                continue
+            prompt = record.get("prompt") or _conversation_to_prompt(record)
+            if accept(prompt):
+                yield prompt
+                if limit is not None and emitted >= limit:
+                    return
+
+
+def prepare_prompt_file(dataset_root: Path, output_dir: Optional[Path], limit: Optional[int]) -> Path:
+    if output_dir is None:
+        output_dir = dataset_root / "processed"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prompt_file = output_dir / "hermes_prompts.txt"
+
+    if prompt_file.exists():
+        return prompt_file
+
+    count = 0
+    with prompt_file.open("w", encoding="utf-8") as out:
+        for prompt in iter_dataset_prompts(dataset_root, limit=limit):
+            if prompt is None:
+                continue
+            out.write(prompt.replace("\n", " ").strip())
+            out.write("\n")
+            count += 1
+
+    if count == 0:
+        raise RuntimeError("No prompts were extracted from the dataset; check dataset contents or limit.")
+
+    print(f"[dataset] Prepared {count} prompts at {prompt_file}")
+    return prompt_file
+
+
 def load_reward_function(path: Optional[Path]) -> RewardFn:
     if path is None:
         def default_reward(prompt: str, response: str) -> float:
-            length_bonus = min(len(response.strip().split()), 128) / 128.0
-            diversity_penalty = response.lower().count(prompt.lower()) * 0.1
-            return float(length_bonus - diversity_penalty)
+            tokens = response.strip().split()
+            length_bonus = min(len(tokens), 128) / 128.0
+            question_bonus = 0.2 if "?" in prompt else 0.0
+            mirror_penalty = response.lower().count(prompt.lower()) * 0.1
+            return float(length_bonus + question_bonus - mirror_penalty)
         return default_reward
 
     if not path.exists():
@@ -285,7 +488,7 @@ def build_inputs_with_response(
 def sequence_log_probs(
     model: Model,
     input_ids: tg.Tensor,
-    attention_mask: tg.Tensor,
+    attention_mask: Optional[tg.Tensor],
     position_ids: tg.Tensor,
     response_length: int
 ) -> Tuple[tg.Tensor, tg.Tensor]:
@@ -309,18 +512,31 @@ def main() -> None:
         raise ValueError("Provide either --config-path for a custom policy or --model-id to download from Hugging Face.")
 
     policy_weights_dir: Optional[Path] = None
+    remote_repo_hint: Optional[str] = None
 
     if args.config_path is not None:
-        if not args.config_path.exists():
-            raise FileNotFoundError(f"Config path {args.config_path} does not exist.")
         policy_config = ModelConfig()
-        policy_config.load(args.config_path)
+        config_candidate = args.config_path
+        if config_candidate.exists():
+            policy_config.load(config_candidate)
+        else:
+            repo_id, filename = parse_remote_identifier(config_candidate, "config.json")
+            config_file = fetch_model_file(repo_id, filename, local_only=args.offline)
+            policy_config.load(config_file)
+            remote_repo_hint = repo_id
         if args.generation_config_path is not None:
-            if not args.generation_config_path.exists():
-                raise FileNotFoundError(
-                    f"Generation config path {args.generation_config_path} does not exist."
+            gen_candidate = args.generation_config_path
+            if gen_candidate.exists():
+                policy_config.load_generation_config(gen_candidate)
+            else:
+                repo_id, filename = parse_remote_identifier(
+                    gen_candidate,
+                    "generation_config.json"
                 )
-            policy_config.load_generation_config(args.generation_config_path)
+                gen_file = fetch_model_file(repo_id, filename, local_only=args.offline)
+                policy_config.load_generation_config(gen_file)
+                if remote_repo_hint is None:
+                    remote_repo_hint = repo_id
         policy_weights_dir = args.weights_dir
         if policy_weights_dir is None and not args.from_scratch:
             print("[warn] No policy weights supplied; toggling --from-scratch.")
@@ -333,14 +549,32 @@ def main() -> None:
         # Guard should prevent reaching this.
         raise ValueError("Invalid policy configuration.")
 
-    tokenizer_id = args.tokenizer_id or args.model_id
+    tokenizer_id = args.tokenizer_id or args.model_id or remote_repo_hint
     if tokenizer_id is None:
         raise ValueError("Tokenizer identifier is required when --model-id is omitted. Provide --tokenizer-id.")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, local_files_only=True)
-    prompts = load_prompts(args.prompts_path)
+
+    prompts_path = args.prompts_path
+    if prompts_path is None:
+        if args.dataset_id is None:
+            raise ValueError("Provide --prompts-path or specify --dataset-id to generate prompts.")
+        dataset_cache_root = args.dataset_cache_dir
+        dataset_snapshot = download_dataset(args.dataset_id, dataset_cache_root, local_only=args.offline)
+        default_processed_root = Path.cwd() / "datasets" / args.dataset_id.replace("/", "__")
+        processed_dir = (
+            (dataset_cache_root / "processed") if dataset_cache_root is not None else default_processed_root
+        )
+        prompts_path = prepare_prompt_file(
+            dataset_snapshot,
+            processed_dir,
+            limit=args.max_dataset_entries
+        )
+        print(f"[dataset] Using prompts from {prompts_path}")
+
+    prompts = load_prompts(prompts_path)
     reward_fn = load_reward_function(args.reward_script)
 
-    model_name = args.model_id or policy_config["model_type"] or "custom"
+    model_name = args.model_id or remote_repo_hint or policy_config["model_type"] or "custom"
     policy_model = prepare_model(
         policy_config,
         policy_weights_dir,
@@ -361,9 +595,13 @@ def main() -> None:
             model_name=model_name
         )
 
-    optimiser = tg.optim.Adam(get_parameters(policy_model), lr=args.learning_rate)
+    policy_params = [param.requires_grad_(True) for param in get_parameters(policy_model)]
+    optimiser = tg.nn.optim.Adam(policy_params, lr=args.learning_rate)
 
     total_steps = 0
+    start_time = time.time()
+    last_display = start_time
+    total_tokens = 0
     for epoch in range(1, args.epochs + 1):
         print(f"\n=== RLHF Epoch {epoch}/{args.epochs} ===")
         for rollout_idx in range(args.rollouts_per_epoch):
@@ -398,7 +636,7 @@ def main() -> None:
             )
 
             policy_input = tg.Tensor(full_ids_np, device=args.device, dtype=tg.dtypes.int32)
-            policy_attention = tg.Tensor(full_attention_np, device=args.device)
+            policy_attention = None
             policy_positions = tg.Tensor(full_position_np, device=args.device, dtype=tg.dtypes.int32)
 
             seq_log_prob, token_log_probs = sequence_log_probs(
@@ -413,7 +651,7 @@ def main() -> None:
             kl_term = tg.Tensor([0.0], device=args.device)
             if reference_model is not None:
                 ref_input = tg.Tensor(full_ids_np, device=args.device, dtype=tg.dtypes.int32)
-                ref_attention = tg.Tensor(full_attention_np, device=args.device)
+                ref_attention = None
                 ref_position = tg.Tensor(full_position_np, device=args.device, dtype=tg.dtypes.int32)
                 _, ref_token_log_probs = sequence_log_probs(
                     reference_model,
@@ -426,17 +664,40 @@ def main() -> None:
 
             response_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             reward_value = reward_fn(prompt, response_text)
-            reward_tensor = tg.Tensor([reward_value], device=args.device)
+            reward_scalar = tg.Tensor([reward_value], device=args.device)
 
-            policy_objective = (reward_tensor * seq_log_prob).mean()
-            loss = -policy_objective + args.kl_beta * kl_term
+            policy_objective = (reward_scalar * seq_log_prob).mean()
+            loss = (-policy_objective + args.kl_beta * kl_term).mean()
 
             optimiser.zero_grad()
-            loss.backward()
-            optimiser.step()
+            original_flag = tg.Tensor.training
+            tg.Tensor.training = True
+            try:
+                loss.backward()
+                missing_grads = [p for p in optimiser.params if p.grad is None]
+                for tensor in missing_grads:
+                    tensor.grad = tg.Tensor.zeros_like(tensor)
+                optimiser.step()
+            finally:
+                tg.Tensor.training = original_flag
+
+            optimiser.zero_grad()
 
             total_steps += 1
+            total_tokens += prompt_ids.shape[1] + response_length
+            now = time.time()
+            if now - last_display >= 0.5:
+                spinner = SPIN_LOOP[total_steps % len(SPIN_LOOP)]
+                elapsed = max(now - start_time, 1e-6)
+                tok_rate = total_tokens / elapsed
+                sys.stdout.write(
+                    f"\r[rlhf] {spinner} step={total_steps} reward={reward_value:.4f} loss={loss.item():.4f} tok/s={tok_rate:.1f}"
+                )
+                sys.stdout.flush()
+                last_display = now
+
             loss_value = float(loss.item())
+            sys.stdout.write("\r")
             print(
                 f"[rollout] step={total_steps} prompt_len={prompt_ids.shape[1]} "
                 f"resp_len={response_length} reward={reward_value:.4f} loss={loss_value:.4f}"
@@ -445,6 +706,12 @@ def main() -> None:
 
             if args.save_dir is not None and total_steps % args.save_interval == 0:
                 save_checkpoint(policy_model, args.save_dir, total_steps)
+
+    elapsed = max(time.time() - start_time, 1e-6)
+    tok_rate = total_tokens / elapsed if total_steps else 0.0
+    print(
+        f"[rlhf] finished {total_steps} steps over {elapsed:.1f}s  ->  {tok_rate:.1f} tok/s"
+    )
 
     if args.save_dir is not None:
         save_checkpoint(policy_model, args.save_dir, total_steps or 1)
