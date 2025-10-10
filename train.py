@@ -523,7 +523,6 @@ def save_checkpoint(model: Model, save_dir: Path, step: int) -> None:
     safe_save(state, str(checkpoint_path))
     print(f"[checkpoint] saved to {checkpoint_path}")
 
-s
 def train_epoch(
     model: Model,
     optimizer: tg.nn.optim.Optimizer,
