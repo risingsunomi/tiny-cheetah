@@ -11,6 +11,7 @@ setup(
         "textual",
         "textual-dev",
         "transformers",
-        "asyncio"
+        "asyncio",
+        "zstandard"
     ],
 )

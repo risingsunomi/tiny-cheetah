@@ -9,6 +9,7 @@ serve as a starting point for custom projects.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -57,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Hugging Face model identifier to download (required unless --config-path is supplied)."
+    )
+    parser.add_argument(
+        "--custom-model-id",
+        type=str,
+        default=None,
+        help="Custom model identifier to use locally."
     )
     parser.add_argument(
         "--tokenizer-id",
@@ -295,18 +302,24 @@ def _conversation_to_text(record: dict) -> Optional[str]:
     return "\n".join(turns)
 
 
-def iter_hermes_text(dataset_root: Path, limit: Optional[int] = None) -> Iterator[str]:
+def extract_dataset(dataset_root: Path, limit: Optional[int] = None) -> Iterator[str]:
     """
-    Yield conversation strings from the Hermes dataset snapshot.
+    Yield conversation strings from a dataset
     """
+
+    # check for jsonl files
     jsonl_files = sorted(dataset_root.rglob("*.jsonl"))
     json_files = sorted(
         path for path in dataset_root.rglob("*.json")
         if path.name not in {"dataset_info.json", "info.json"}
     )
+    use_jsonl = True if jsonl_files else False
+
+    # check for zst files
+    zst_files = sorted(dataset_root.rglob("*.zst"))
+    use_zst = True if not zst_files else False
 
     emitted = 0
-
     def maybe_yield(text_value: Optional[str]) -> bool:
         nonlocal emitted
         if text_value:
@@ -316,74 +329,103 @@ def iter_hermes_text(dataset_root: Path, limit: Optional[int] = None) -> Iterato
                 return True
         return False
 
-    for path in jsonl_files:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
+    if use_jsonl:
+        for path in jsonl_files:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    text = _conversation_to_text(record)
+                    if maybe_yield(text):
+                        yield text
+                        if limit is not None and emitted >= limit:
+                            return
+
+        for path in json_files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(data, dict):
+                maybe_data = data.get("data") or data.get("examples") or data.get("conversations")
+                if isinstance(maybe_data, list):
+                    data = maybe_data
+            if not isinstance(data, list):
+                continue
+
+            for record in data:
+                if not isinstance(record, dict):
                     continue
                 text = _conversation_to_text(record)
                 if maybe_yield(text):
                     yield text
                     if limit is not None and emitted >= limit:
                         return
-
-    for path in json_files:
+    elif use_zst:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            continue
+            import zstandard as zstd
+        except ImportError as exc:
+            raise ImportError(
+                "zstandard is required to read .zst dataset files. "
+                "Install it with `pip install zstandard`."
+            ) from exc
 
-        if isinstance(data, dict):
-            maybe_data = data.get("data") or data.get("examples") or data.get("conversations")
-            if isinstance(maybe_data, list):
-                data = maybe_data
-        if not isinstance(data, list):
-            continue
+        dctx = zstd.ZstdDecompressor()
+        for path in zst_files:
+            with path.open("rb") as compressed:
+                with dctx.stream_reader(compressed) as reader:
+                    text_stream = tg.utils.BufferedLineReader(reader)
+                    for line in text_stream:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        text = _conversation_to_text(record)
+                        if maybe_yield(text):
+                            yield text
+                            if limit is not None and emitted >= limit:
+                                return
+    else:
+        raise RuntimeError(f"No supported dataset (jsonl, .zst) files found under {dataset_root}.")
 
-        for record in data:
-            if not isinstance(record, dict):
-                continue
-            text = _conversation_to_text(record)
-            if maybe_yield(text):
-                yield text
-                if limit is not None and emitted >= limit:
-                    return
-
-
-def prepare_hermes_corpus(
+def prepare_dataset_corpus(
     dataset_root: Path,
     output_dir: Optional[Path] = None,
     limit: Optional[int] = None
 ) -> Path:
     """
-    Convert Hermes conversations into a newline-delimited text corpus and return the file path.
+    Converts dataset conversations into a newline-delimited text corpus and return the file path.
     """
     if output_dir is None:
-        output_dir = dataset_root / "processed"
+        output_dir = dataset_root / "processed_" / datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
-    corpus_path = output_dir / "hermes_corpus.txt"
+    corpus_path = output_dir / "dataset_corpus.txt"
 
     if corpus_path.exists():
         return corpus_path
 
     count = 0
     with corpus_path.open("w", encoding="utf-8") as out:
-        for text in iter_hermes_text(dataset_root, limit=limit):
+        for text in extract_dataset(dataset_root, limit=limit):
             out.write(text)
             out.write("\n\n")
             count += 1
 
     if count == 0:
         raise RuntimeError(
-            f"No conversations found when processing Hermes dataset under {dataset_root}."
+            f"No conversations found when processing dataset under {dataset_root}."
         )
 
-    print(f"[dataset] Prepared {count} Hermes conversations at {corpus_path}")
+    print(f"[dataset] Prepared {count} dataset conversations at {corpus_path}")
     return corpus_path
 
 
@@ -481,7 +523,7 @@ def save_checkpoint(model: Model, save_dir: Path, step: int) -> None:
     safe_save(state, str(checkpoint_path))
     print(f"[checkpoint] saved to {checkpoint_path}")
 
-
+s
 def train_epoch(
     model: Model,
     optimizer: tg.nn.optim.Optimizer,
@@ -618,7 +660,10 @@ def main() -> None:
     ensure_required_keys(config_loader)
     config_dict = config_loader.model_config if hasattr(config_loader, "model_config") else config_loader
 
-    model_name = args.model_id or remote_repo_hint or config_dict.get("model_type") or "custom"
+    if args.custom_model_id is not None:
+        model_name = args.custom_model_id
+    else:
+        model_name = args.model_id or remote_repo_hint or config_dict.get("model_type") or "custom"
     shard = Shard(
         model_name,
         start_layer=0,
@@ -707,7 +752,7 @@ def main() -> None:
         processed_dir = (
             (dataset_cache_root / "processed") if dataset_cache_root is not None else default_processed_root
         )
-        data_path = prepare_hermes_corpus(
+        data_path = prepare_dataset_corpus(
             dataset_snapshot,
             processed_dir,
             limit=args.max_dataset_entries
