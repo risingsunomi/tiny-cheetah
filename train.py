@@ -121,6 +121,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on the number of dataset conversations to process."
     )
     parser.add_argument(
+        "--max-sequences-per-epoch",
+        type=int,
+        default=None,
+        help="Optional cap on the number of tokenized sequences to run each epoch (limits runtime and memory)."
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Only use locally cached Hugging Face files (no network)."
@@ -160,6 +166,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Update weights every N steps instead of every step."
+    )
+    parser.add_argument(
+        "--low-mem",
+        action="store_true",
+        help="Apply conservative defaults for memory-constrained devices (e.g. Apple Silicon)."
     )
     parser.add_argument(
         "--save-dir",
@@ -535,6 +546,7 @@ def train_epoch(
     model_loss = 0.0
     step_loss = 0.0
     steps = 0
+    accum_window = max(1, grad_accum)
     optimizer.zero_grad()
     orig_training_flag = tg.Tensor.training
     tg.Tensor.training = True
@@ -554,7 +566,7 @@ def train_epoch(
             labels = batch.labels.reshape(-1).cast(tg.dtypes.default_int)
 
             loss = cross_entropy_loss(logits, labels)
-            loss.backward()
+            (loss / accum_window).backward()
             step_loss += loss.item()
 
             seq_tokens = batch.input_ids.shape[0] * batch.input_ids.shape[1]
@@ -570,7 +582,7 @@ def train_epoch(
                 sys.stdout.flush()
                 last_display = now
 
-            if step % grad_accum == 0:
+            if step % accum_window == 0:
                 missing_grads = [p for p in optimizer.params if p.grad is None]
                 for tensor in missing_grads:
                     tensor.grad = tg.Tensor.zeros_like(tensor)
@@ -593,7 +605,7 @@ def train_epoch(
             return math.nan
 
         # Handle leftover gradients when grad_accum does not divide steps
-        if steps % grad_accum != 0:
+        if steps % accum_window != 0:
             missing_grads = [p for p in optimizer.params if p.grad is None]
             for tensor in missing_grads:
                 tensor.grad = tg.Tensor.zeros_like(tensor)
@@ -613,6 +625,26 @@ def train_epoch(
 
 def main() -> None:
     args = parse_args()
+
+    device_upper = args.device.upper()
+    if args.low_mem:
+        if args.seq_length > 512:
+            print(f"[low-mem] Reducing seq_length from {args.seq_length} to 512")
+            args.seq_length = 512
+        if args.batch_size > 1:
+            print(f"[low-mem] Reducing batch_size from {args.batch_size} to 1")
+            args.batch_size = 1
+        if args.gradient_accumulation > 4:
+            print(f"[low-mem] Capping gradient_accumulation from {args.gradient_accumulation} to 4")
+            args.gradient_accumulation = 4
+        if args.max_sequences_per_epoch is None:
+            args.max_sequences_per_epoch = 512
+            print("[low-mem] Limiting sequences per epoch to 512")
+    elif device_upper == "METAL":
+        print("[warn] Training on METAL can exhaust memory. Consider re-running with --low-mem.")
+
+    if args.gradient_accumulation < 1:
+        raise ValueError("--gradient-accumulation must be at least 1")
 
     if args.config_path is None and args.model_id is None:
         raise ValueError("Provide either --config-path for a custom model or --model-id to download from Hugging Face.")
@@ -769,7 +801,8 @@ def main() -> None:
             data_path=data_path,
             seq_length=args.seq_length,
             batch_size=args.batch_size,
-            device=args.device
+            device=args.device,
+            max_sequences=args.max_sequences_per_epoch
         )
         avg_loss = train_epoch(model, optimizer, batches, args.gradient_accumulation)
         if math.isnan(avg_loss):

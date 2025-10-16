@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+import inspect
 import os
-import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
+import traceback
 
 import tinygrad as tg
 from transformers import AutoTokenizer
@@ -20,11 +22,11 @@ from tiny_cheetah.repos import RepoCustom
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Container
 from textual.events import Mount
 from textual.message import Message
 from textual.message_pump import MessagePump
-from textual.screen import ModalScreen, Screen
+from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
 
@@ -32,7 +34,6 @@ class ChatModelSelected(Message):
     def __init__(self, sender: MessagePump, model_id: str) -> None:
         super().__init__(sender)
         self.model_id = model_id
-
 
 class ChatScreen(Screen[None]):
     """Primary chat interface."""
@@ -60,6 +61,12 @@ class ChatScreen(Screen[None]):
         self._history: List[Dict[str, str]] = []
         self._generation_thread_in_progress = False
         self.out_tokens: List[int] = []
+        self._loading_in_progress = False
+        self._loading_task: Optional[asyncio.Task] = None
+        self._generation_task: Optional[asyncio.Task] = None
+        self._post_load_callbacks: List[Callable[[], Optional[Awaitable[None]]]] = []
+        self._pending_generation = False
+        self._load_button: Optional[Button] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -73,7 +80,9 @@ class ChatScreen(Screen[None]):
                         self._model_label = model_value
                         yield model_value
                         yield Button("Select Model", id="open-model-picker")
-                        yield Button("Load Model", id="load-model")
+                        load_button = Button("Load Model", id="load-model")
+                        self._load_button = load_button
+                        yield load_button
                     with Static(id="nodes-panel"):
                         yield Label("Nodes", classes="panel-title")
                         yield Label("Self", id="nodes-value")
@@ -100,7 +109,7 @@ class ChatScreen(Screen[None]):
     def action_open_model_picker(self) -> None:
         self._open_model_picker()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "open-model-picker":
             self._open_model_picker()
         elif event.button.id == "load-model":
@@ -110,13 +119,7 @@ class ChatScreen(Screen[None]):
             if self._model is not None and self._tokenizer is not None:
                 self._append_system("Model already loaded.")
                 return
-            
-            try:
-                load_model_t = threading.Thread(target=self._load_model_thread, args=(self,))
-                load_model_t.start()
-                load_model_t.join()
-            except Exception as exc:  # pragma: no cover
-                self._append_system(f"Failed to load model: {exc}")
+            await self._start_model_load()
         elif event.button.id == "chat-back":
             self.app.pop_screen()
         elif event.button.id == "clear-model":
@@ -143,7 +146,7 @@ class ChatScreen(Screen[None]):
         self._append_system(f"Model set to '{result}'.")
         self._append_system("Click 'Load Model' to download weights into memory.")
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "chat-input":
             return
         content = event.value.strip()
@@ -153,24 +156,24 @@ class ChatScreen(Screen[None]):
         if not self._model_id:
             self._append_system("Select a model before chatting (Ctrl+S).")
             return
-        if self._model is None or self._tokenizer is None:
-            self._append_system("Loading model now...")
-            try:
-                load_model_t = threading.Thread(target=self._load_model_thread, args=(self,))
-                load_model_t.start()
-                load_model_t.join()
-            except Exception as exc:  # pragma: no cover
-                self._append_system(f"Failed to load model: {exc}")
-                return
         if self._generation_thread_in_progress:
             self._append_system("Model is generating a response; please wait...")
             return
+        if self._loading_in_progress:
+            self._append_system("Model load in progress. Please wait…")
+            return
+
         self._append_user(content)
         self._history.append({"role": "user", "content": content})
-        try:
-            self._generate_response()
-        except Exception as exc:  # pragma: no cover - runtime safety
-            self._append_system(f"Error: {exc}")
+
+        if self._model is None or self._tokenizer is None:
+            self._append_system("Loading model now...")
+            self._pending_generation = True
+            await self._start_model_load(self._continue_generation)
+            return
+
+        self._pending_generation = False
+        self._schedule_generation()
 
 
     def _append_user(self, content: str) -> None:
@@ -186,6 +189,31 @@ class ChatScreen(Screen[None]):
             self._chat_log.write(
                 f"({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) [bold][#00FF00]System[/][/bold]: {text}\n"
             )
+
+    def _set_load_button_enabled(self, enabled: bool) -> None:
+        if self._load_button is not None:
+            self._load_button.disabled = not enabled
+
+    def _schedule_generation(self) -> None:
+        if self._generation_task is not None and not self._generation_task.done():
+            return
+        if self._model is None or self._tokenizer is None:
+            return
+        if self._generation_thread_in_progress:
+            return
+        task = asyncio.create_task(self._generate_response())
+        self._generation_task = task
+        task.add_done_callback(self._on_generation_task_done)
+
+    def _on_generation_task_done(self, task: asyncio.Future) -> None:
+        self._generation_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            self._append_system(f"Error: {exc}")
 
     def _append_model(self, content: str) -> None:
         if self._chat_log is not None:
@@ -206,20 +234,147 @@ class ChatScreen(Screen[None]):
             return default if value is None else value
         return default
 
-    def _load_model_thread(self) -> None:
-        self._append_system(f"Loading model '{self._model_id}'...")
+    async def _start_model_load(
+        self,
+        on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None
+    ) -> None:
+        if self._loading_in_progress:
+            self._append_system("Model load already in progress…")
+            if on_complete is not None:
+                self._post_load_callbacks.append(on_complete)
+            return
         if not self._model_id:
-            raise RuntimeError("No model selected")
-        start = time.time()
-        model, model_config, tokenizer, model_path, messages = self._load_model_worker()
-        for message in messages:
-            self._append_system(message)
-        elapsed = time.time() - start
+            self._append_system("No model selected to load.")
+            return
+
+        if on_complete is not None:
+            self._post_load_callbacks.append(on_complete)
+
+        self._loading_in_progress = True
+        self._set_load_button_enabled(False)
+        self._append_system(f"Loading model '{self._model_id}'...")
+        self._log_loading_message("Preparing model load…")
+
+        async def load_task() -> None:
+            try:
+                model, model_config, tokenizer, model_path, elapsed = await self._load_model_async()
+            except Exception as exc:  # pragma: no cover - runtime safety
+                await self._handle_load_failure(str(exc))
+                return
+            await self._handle_load_success(model, model_config, tokenizer, model_path, elapsed)
+
+        self._loading_task = asyncio.create_task(load_task())
+        self._loading_task.add_done_callback(self._on_load_task_finished)
+
+    async def _handle_load_failure(self, message: str) -> None:
+        self._log_loading_message(f"Error loading model: {message}")
+        self._loading_in_progress = False
+        self._set_load_button_enabled(True)
+        self._post_load_callbacks.clear()
+        self._pending_generation = False
+        if self._input is not None:
+            self._input.focus()
+
+    async def _handle_load_success(
+        self,
+        model: Model,
+        model_config: object,
+        tokenizer: AutoTokenizer,
+        model_path: Path,
+        elapsed: float
+    ) -> None:
+        ready_msg = f"Model ready in {elapsed:.1f}s."
+        self._log_loading_message(ready_msg)
+        self._loading_in_progress = False
+        self._set_load_button_enabled(True)
         self._model = model
         self._model_config = model_config
         self._tokenizer = tokenizer
         self._model_cache_path = model_path
-        self._append_system(f"Model ready in {elapsed:.1f}s.")
+        if self._input is not None:
+            self._input.focus()
+        callbacks = list(self._post_load_callbacks)
+        self._post_load_callbacks.clear()
+        for callback in callbacks:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+
+    def _on_load_task_finished(self, task: asyncio.Future) -> None:
+        self._loading_task = None
+        try:
+            task.result()
+        except Exception:
+            # Exceptions are reported in the load task itself.
+            pass
+
+    def _log_loading_message(self, message: str) -> None:
+        self._append_system(message)
+
+    def _continue_generation(self) -> Optional[Awaitable[None]]:
+        if not self._pending_generation:
+            return None
+        if self._model is None or self._tokenizer is None:
+            return None
+        if self._generation_thread_in_progress:
+            return None
+        self._pending_generation = False
+        self._schedule_generation()
+        return None
+
+    async def _load_model_async(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
+        start = time.time()
+        candidate_path = Path(self._model_id).expanduser()
+        tokenizer_source: str
+        tokenizer_local: bool
+        self._log_loading_message(f"Resolving model '{self._model_id}'")
+
+        if candidate_path.exists():
+            self._log_loading_message(f"Loading local model from {candidate_path}")
+            model_path, model_config = await asyncio.to_thread(self._load_local_config, candidate_path)
+            tokenizer_source = str(model_path)
+            tokenizer_local = True
+        else:
+            self._log_loading_message(f"Downloading model from Hugging Face: {self._model_id}")
+            if RepoCustom is None:
+                raise RuntimeError("huggingface_hub is required to download models.")
+            repo = RepoCustom(self._model_id)
+            model_path, model_config, repo_messages = await asyncio.to_thread(repo.download)
+            for msg in repo_messages:
+                self._log_loading_message(f"[download] {msg}")
+            self._log_loading_message(f"Model cached at {model_path}")
+            tokenizer_source = str(model_path)
+            tokenizer_local = True
+
+        num_layers = int(self._config_get(model_config, "num_layers", 0))
+        shard = Shard(
+            self._model_id,
+            start_layer=0,
+            end_layer=num_layers,
+            total_layers=num_layers + 1,
+        )
+        self._log_loading_message(f"Instantiating shard {shard}")
+        model = await asyncio.to_thread(Model, model_config, shard)
+        self._log_loading_message("Loading weights…")
+        weight_device = os.getenv("TC_DEVICE", "CPU")
+        use_tied = bool(self._config_get(model_config, "tie_word_embeddings", False))
+        await asyncio.to_thread(
+            load_safetensors,
+            model,
+            model_path,
+            model_config,
+            weight_device=weight_device,
+            use_tied=use_tied,
+        )
+        self._log_loading_message("Weights loaded.")
+        tokenizer = await asyncio.to_thread(
+            AutoTokenizer.from_pretrained,
+            tokenizer_source,
+            local_files_only=tokenizer_local,
+        )
+        self._log_loading_message("Tokenizer ready.")
+        elapsed = time.time() - start
+        return model, model_config, tokenizer, model_path, elapsed
 
     def _load_local_config(self, directory: Path) -> tuple[Path, ModelConfig]:
         config = ModelConfig()
@@ -232,45 +387,7 @@ class ChatScreen(Screen[None]):
             config.load_generation_config(gen_config)
         return directory, config
 
-    def _load_model_worker(self):
-        log_messages: List[str] = []
-        candidate_path = Path(self._model_id).expanduser()
-        if candidate_path.exists():
-            log_messages.append(f"Loading local model from {candidate_path}")
-            model_path, model_config = self._load_local_config(candidate_path)
-            tokenizer_source = str(model_path)
-            tokenizer_local = True
-        else:
-            log_messages.append(f"Downloading model from Hugging Face: {self._model_id}")
-            if RepoCustom is None:
-                raise RuntimeError("huggingface_hub is required to download models.")
-            repo = RepoCustom(self._model_id)
-            model_path, model_config, repo_messages = repo.download()
-            log_messages.extend(f"[download] {msg}" for msg in repo_messages)
-            log_messages.append(f"Model cached at {model_path}")
-            tokenizer_source = str(model_path)
-            tokenizer_local = True
-
-        num_layers = int(self._config_get(model_config, "num_layers", 0))
-        shard = Shard(
-            self._model_id,
-            start_layer=0,
-            end_layer=num_layers,
-            total_layers=num_layers + 1,
-        )
-        log_messages.append(f"Instantiating shard {shard}")
-        model = Model(model_config, shard)
-        load_safetensors(
-            model,
-            model_path,
-            model_config,
-            weight_device=os.getenv("TC_DEVICE", "CPU"),
-            use_tied=bool(self._config_get(model_config, "tie_word_embeddings", False)),
-        )
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=tokenizer_local)
-        return model, model_config, tokenizer, model_path, log_messages
-
-    def _generate_response(self, max_new_tokens: int = 128) -> None:
+    async def _generate_response(self, max_new_tokens: int = 128) -> None:
         if self._model is None or self._tokenizer is None:
             return
         assert self._tokenizer is not None
@@ -297,7 +414,8 @@ class ChatScreen(Screen[None]):
 
         self._generation_thread_in_progress = True
         try:
-            out_tokens, elapsed = self._generate_tokens_worker(
+            result = await asyncio.to_thread(
+                self._generate_tokens_worker,
                 self._model,
                 self._tokenizer,
                 input_ids,
@@ -307,11 +425,9 @@ class ChatScreen(Screen[None]):
                 top_k,
                 top_p,
             )
-        except Exception as exc:
+        finally:
             self._generation_thread_in_progress = False
-            self._append_system(f"Error: {exc}")
-            return
-        self._generation_thread_in_progress = False
+        out_tokens, elapsed = result
         self._on_generation_complete(out_tokens, elapsed)
 
     def _on_generation_complete(self, out_tokens: list[int], elapsed: float) -> None:
@@ -338,12 +454,15 @@ class ChatScreen(Screen[None]):
         self._model_cache_path = None
         self._history.clear()
         self._generation_thread_in_progress = False
+        if self._generation_task is not None and not self._generation_task.done():
+            self._generation_task.cancel()
+        self._generation_task = None
+        self._pending_generation = False
+        if not self._loading_in_progress:
+            self._set_load_button_enabled(True)
         if self._model_label is not None:
             self._model_label.update("<select>")
         self._append_system("Model cleared. Select and load a model to continue.")
-
-
-   
 
     def _generate_tokens_worker(
         self,
