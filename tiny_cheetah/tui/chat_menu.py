@@ -121,6 +121,7 @@ class ChatScreen(Screen[None]):
                 return
             await self._start_model_load()
         elif event.button.id == "chat-back":
+            self._clear_model()
             self.app.pop_screen()
         elif event.button.id == "clear-model":
             self._clear_model()
@@ -147,33 +148,32 @@ class ChatScreen(Screen[None]):
         self._append_system("Click 'Load Model' to download weights into memory.")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "chat-input":
-            return
-        content = event.value.strip()
-        if not content:
-            return
-        event.input.value = ""
-        if not self._model_id:
-            self._append_system("Select a model before chatting (Ctrl+S).")
-            return
-        if self._generation_thread_in_progress:
-            self._append_system("Model is generating a response; please wait...")
-            return
-        if self._loading_in_progress:
-            self._append_system("Model load in progress. Please wait…")
-            return
+        if event.input.id == "chat-input":
+            content = event.value.strip()
+            if not content:
+                return
+            event.input.value = ""
+            if not self._model_id:
+                self._append_system("Select a model before chatting (Ctrl+S).")
+                return
+            if self._generation_thread_in_progress:
+                self._append_system("Model is generating a response; please wait...")
+                return
+            if self._loading_in_progress:
+                self._append_system("Model load in progress. Please wait…")
+                return
 
-        self._append_user(content)
-        self._history.append({"role": "user", "content": content})
+            self._append_user(content)
+            self._history.append({"role": "user", "content": content})
 
-        if self._model is None or self._tokenizer is None:
-            self._append_system("Loading model now...")
-            self._pending_generation = True
-            await self._start_model_load(self._continue_generation)
-            return
+            if self._model is None or self._tokenizer is None:
+                self._append_system("Loading model now...")
+                self._pending_generation = True
+                await self._start_model_load(self._continue_generation)
+                return
 
-        self._pending_generation = False
-        self._schedule_generation()
+            self._pending_generation = False
+            self._schedule_generation()
 
 
     def _append_user(self, content: str) -> None:
@@ -324,13 +324,17 @@ class ChatScreen(Screen[None]):
 
     async def _load_model_async(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
         start = time.time()
-        candidate_path = Path(self._model_id).expanduser()
+        sanitized = self._model_id.replace("/", "__")
+        candidate_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
+
+        # candidate_path = Path(self._model_id).expanduser()
         tokenizer_source: str
         tokenizer_local: bool
         self._log_loading_message(f"Resolving model '{self._model_id}'")
 
         if candidate_path.exists():
-            self._log_loading_message(f"Loading local model from {candidate_path}")
+            self._log_loading_message(f"Loading local model from {candidate_path} (loop ID {asyncio.get_event_loop()})")
+            # model_path, model_config = self._load_local_config(candidate_path)
             model_path, model_config = await asyncio.to_thread(self._load_local_config, candidate_path)
             tokenizer_source = str(model_path)
             tokenizer_local = True
@@ -354,7 +358,9 @@ class ChatScreen(Screen[None]):
             total_layers=num_layers + 1,
         )
         self._log_loading_message(f"Instantiating shard {shard}")
+        # causing segmentation fault on macosx METAL
         model = await asyncio.to_thread(Model, model_config, shard)
+        self._log_loading_message(f"Model instantiated. {model}")
         self._log_loading_message("Loading weights…")
         weight_device = os.getenv("TC_DEVICE", "CPU")
         use_tied = bool(self._config_get(model_config, "tie_word_embeddings", False))
@@ -387,7 +393,7 @@ class ChatScreen(Screen[None]):
             config.load_generation_config(gen_config)
         return directory, config
 
-    async def _generate_response(self, max_new_tokens: int = 128) -> None:
+    async def _generate_response(self, max_new_tokens: int = 4096) -> None:
         if self._model is None or self._tokenizer is None:
             return
         assert self._tokenizer is not None
@@ -448,8 +454,8 @@ class ChatScreen(Screen[None]):
 
     def _clear_model(self) -> None:
         self._append_system("Clearing loaded model.")
-        self._model = None
-        self._model_config = None
+        del self._model
+        del self._model_config
         self._tokenizer = None
         self._model_cache_path = None
         self._history.clear()

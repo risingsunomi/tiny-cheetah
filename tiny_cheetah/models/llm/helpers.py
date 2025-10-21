@@ -197,7 +197,7 @@ def generate(
     input_ids: tg.Tensor, # [B, S]
     attention_mask: tg.Tensor,
     tokenizer: Any,
-    max_new_tokens: int = 1024,
+    max_new_tokens: int = 2048,
     temp: float=1.0,
     top_k: Optional[int] = 0,
     top_p: Optional[float] = 0.8,

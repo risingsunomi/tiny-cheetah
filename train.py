@@ -179,9 +179,9 @@ def parse_args() -> argparse.Namespace:
         help="Optional directory to store safetensor checkpoints."
     )
     parser.add_argument(
-        "--from-scratch",
+        "--finetune",
         action="store_true",
-        help="Skip loading the pretrained safetensors and train from scratch."
+        help="Finetune a model, if false train from scratch."
     )
     return parser.parse_args()
 
@@ -676,9 +676,9 @@ def main() -> None:
                 if remote_repo_hint is None:
                     remote_repo_hint = repo_id
         model_path = args.weights_dir
-        if model_path is None and not args.from_scratch:
-            print("[warn] No weights directory supplied; switching to --from-scratch.")
-            args.from_scratch = True
+        if model_path is None:
+            print("[warn] No weights directory supplied; switching to training new model.")
+            args.finetune = False
     elif args.model_id is not None:
         repo = RepoHuggingFace(args.model_id)
         model_path, config_loader = repo.download()
@@ -708,7 +708,7 @@ def main() -> None:
         use_tied=config_dict.get("tie_word_embeddings", False)
     )
 
-    if not args.from_scratch:
+    if args.finetune:
         if model_path is None:
             raise ValueError("Weights directory must be provided when not training from scratch.")
         print("Loading pretrained weights...")

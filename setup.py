@@ -12,6 +12,7 @@ setup(
         "textual-dev",
         "transformers",
         "asyncio",
-        "zstandard"
+        "zstandard",
+        "dotenv"
     ],
 )

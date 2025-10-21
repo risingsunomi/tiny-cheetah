@@ -34,6 +34,10 @@ class RepoCustom:
     def download(self, extra_files: Iterable[str] | None = None, revision: str = "main") -> tuple[Path, ModelConfig, List[str]]:
         messages: List[str] = []
 
+        if os.path.exists(self.base_dir):
+            self._load_configs()
+            return self.base_dir, self.model_config, messages
+
         repo_tree = self._fetch_file_list(revision)
         repo_files = [entry["path"] for entry in repo_tree if entry.get("type") == "file"]
 

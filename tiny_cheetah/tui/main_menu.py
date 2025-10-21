@@ -12,9 +12,14 @@ from .train_menu import TrainScreen
 class MainMenu(App):
     CSS_PATH = Path(__file__).with_name("main_menu.tcss")
 
-    def __init__(self, training_defaults: Optional[dict] = None) -> None:
+    def __init__(
+        self,
+        training_defaults: Optional[dict] = None,
+        chat_default: Optional[str] = None
+    ) -> None:
         super().__init__()
         self.training_defaults = training_defaults or {}
+        self.chat_default = chat_default
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -40,7 +45,7 @@ class MainMenu(App):
         button_id = event.button.id
         if button_id == "chat-btn":
             defaults = getattr(self, "training_defaults", {}) or {}
-            default_model = defaults.get("model-id") or defaults.get("custom-model-id")
+            default_model = self.chat_default or defaults.get("model-id") or defaults.get("custom-model-id")
             self.push_screen(ChatScreen(default_model=default_model))
         elif button_id == "train-btn":
             screen = TrainScreen()
