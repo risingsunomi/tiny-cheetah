@@ -46,8 +46,9 @@ class ChatScreen(Screen[None]):
         Binding("ctrl+b", "pop_screen", "Menu"),
     ]
 
-    def __init__(self, default_model: str | None = None) -> None:
+    def __init__(self, default_model: str | None = None, offline: bool = False) -> None:
         super().__init__()
+        self._offline = offline
         self._chat_log: Optional[RichLog] = None
         self._input: Optional[Input] = None
         self._model_id = default_model or ""
@@ -325,19 +326,26 @@ class ChatScreen(Screen[None]):
     async def _load_model_async(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
         start = time.time()
         sanitized = self._model_id.replace("/", "__")
-        candidate_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
+        cache_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
+        candidate_path = Path(self._model_id).expanduser()
 
-        # candidate_path = Path(self._model_id).expanduser()
         tokenizer_source: str
         tokenizer_local: bool
         self._log_loading_message(f"Resolving model '{self._model_id}'")
 
+        resolved_path: Path | None = None
         if candidate_path.exists():
-            self._log_loading_message(f"Loading local model from {candidate_path} (loop ID {asyncio.get_event_loop()})")
-            # model_path, model_config = self._load_local_config(candidate_path)
-            model_path, model_config = await asyncio.to_thread(self._load_local_config, candidate_path)
+            resolved_path = candidate_path
+        elif cache_path.exists():
+            resolved_path = cache_path
+
+        if resolved_path is not None:
+            self._log_loading_message(f"Loading local model from {resolved_path}")
+            model_path, model_config = await asyncio.to_thread(self._load_local_config, resolved_path)
             tokenizer_source = str(model_path)
             tokenizer_local = True
+        elif self._offline:
+            raise RuntimeError("Offline mode requires cached model weights.")
         else:
             self._log_loading_message(f"Downloading model from Hugging Face: {self._model_id}")
             if RepoCustom is None:

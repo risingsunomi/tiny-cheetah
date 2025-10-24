@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Header, Input, Label, Log, Static
 
@@ -181,24 +181,26 @@ class TrainScreen(Screen[None]):
                     yield Button("Stop", id="stop-training", disabled=True)
                     yield Button("Back", id="back-to-menu")
             with Container(id="train-right"):
-                with Static(id="stats-panel"):
-                    yield Label("Status: Idle", id="stat-status")
-                    yield Label("Step: 0", id="stat-step")
-                    yield Label("Epoch: 0", id="stat-epoch")
-                    yield Label("Loss: --", id="stat-loss")
-                    yield Label("Tokens: 0", id="stat-tokens")
-                    yield Label("Tok/s: --", id="stat-tok-rate")
-                with Static(id="settings-panel"):
-                    yield Label("Settings", id="settings-title")
-                    yield Label("Model: --", id="settings-model")
-                    yield Label("Dataset: --", id="settings-data")
-                    yield Button("Edit Settings", id="open-settings")
-                    self._active_args_label = Label("Active Args: --", id="active-args")
-                    yield self._active_args_label
-                with Static(id="resource-panel"):
-                    yield Label("CPU: --", id="resource-cpu")
-                    yield Label("Memory: --", id="resource-ram")
-                    yield Label("GPU: --", id="resource-gpu")
+                with VerticalScroll(id="train-right-scroll"):
+                    with Container(id="train-right-content"):
+                        with Static(id="stats-panel"):
+                            yield Label("Status: Idle", id="stat-status")
+                            yield Label("Step: 0", id="stat-step")
+                            yield Label("Epoch: 0", id="stat-epoch")
+                            yield Label("Loss: --", id="stat-loss")
+                            yield Label("Tokens: 0", id="stat-tokens")
+                            yield Label("Tok/s: --", id="stat-tok-rate")
+                        with Static(id="settings-panel"):
+                            yield Label("Settings", id="settings-title")
+                            yield Label("Model: --", id="settings-model")
+                            yield Label("Dataset: --", id="settings-data")
+                            yield Button("Edit Settings", id="open-settings")
+                            self._active_args_label = Label("Active Args: --", id="active-args")
+                            yield self._active_args_label
+                        with Static(id="resource-panel"):
+                            yield Label("CPU: --", id="resource-cpu")
+                            yield Label("Memory: --", id="resource-ram")
+                            yield Label("GPU: --", id="resource-gpu")
 
     def apply_default_settings(self, defaults: Dict[str, object]) -> None:
         for key, value in defaults.items():
@@ -536,22 +538,23 @@ class TrainSettingsScreen(ModalScreen[Dict[str, object]]):
         per_column = math.ceil(len(SETTINGS_FIELDS) / columns)
         with Container(id="settings-modal-container"):
             yield Static("Training Settings", id="settings-modal-title")
-            with Container(id="settings-columns"):
-                for chunk in chunked(SETTINGS_FIELDS, per_column):
-                    with Vertical(classes="settings-column"):
-                        for field in chunk:
-                            name = str(field["name"])
-                            label = str(field["label"])
-                            field_type = field.get("type", "text")
-                            yield Label(label, classes="settings-field-label")
-                            if field_type == "checkbox":
-                                widget = Checkbox(id=f"settings-{name}")
-                            else:
-                                placeholder = str(field.get("placeholder", ""))
-                                widget = Input(id=f"settings-{name}", placeholder=placeholder)
-                            widget.add_class("settings-field-input")
-                            self._inputs[name] = widget
-                            yield widget
+            with VerticalScroll(id="settings-scroll"):
+                with Container(id="settings-columns"):
+                    for chunk in chunked(SETTINGS_FIELDS, per_column):
+                        with Vertical(classes="settings-column"):
+                            for field in chunk:
+                                name = str(field["name"])
+                                label = str(field["label"])
+                                field_type = field.get("type", "text")
+                                yield Label(label, classes="settings-field-label")
+                                if field_type == "checkbox":
+                                    widget = Checkbox(id=f"settings-{name}")
+                                else:
+                                    placeholder = str(field.get("placeholder", ""))
+                                    widget = Input(id=f"settings-{name}", placeholder=placeholder)
+                                widget.add_class("settings-field-input")
+                                self._inputs[name] = widget
+                                yield widget
             with Container(id="settings-modal-buttons"):
                 yield Button("Cancel", id="settings-cancel")
                 yield Button("Apply", id="settings-apply", variant="primary")

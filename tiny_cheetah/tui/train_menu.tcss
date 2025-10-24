@@ -26,6 +26,14 @@ Screen {
     padding-left: 1;
 }
 
+#train-right-scroll {
+    height: 1fr;
+}
+
+#train-right-content {
+    padding-right: 1;
+}
+
 #model-banner {
     height: 2;
     content-align: center middle;
@@ -70,10 +78,6 @@ Screen {
 #stats-panel,
 #settings-panel {
     margin-bottom: 1;
-}
-
-#settings-panel {
-    height: 1fr;
 }
 
 #resource-panel {
@@ -125,11 +129,16 @@ ModalScreen#train-settings {
     margin-bottom: 1;
 }
 
+#settings-scroll {
+    height: 1fr;
+    overflow-y: auto;
+    padding-right: 1;
+}
+
 #settings-columns {
     layout: horizontal;
     padding-right: 3;
     padding-left: 3;
-    height: 1fr;
 }
 
 .settings-column {

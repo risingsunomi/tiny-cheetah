@@ -15,11 +15,13 @@ class MainMenu(App):
     def __init__(
         self,
         training_defaults: Optional[dict] = None,
-        chat_default: Optional[str] = None
+        chat_default: Optional[str] = None,
+        offline_mode: bool = False,
     ) -> None:
         super().__init__()
         self.training_defaults = training_defaults or {}
         self.chat_default = chat_default
+        self.offline_mode = offline_mode
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -39,6 +41,8 @@ class MainMenu(App):
 
     def on_mount(self) -> None:
         self.title="[tiny-cheetah] v0.1"
+        if self.offline_mode:
+            self.title += " [offline]"
         self.sub_title="Active Nodes 1"
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -46,7 +50,7 @@ class MainMenu(App):
         if button_id == "chat-btn":
             defaults = getattr(self, "training_defaults", {}) or {}
             default_model = self.chat_default or defaults.get("model-id") or defaults.get("custom-model-id")
-            self.push_screen(ChatScreen(default_model=default_model))
+            self.push_screen(ChatScreen(default_model=default_model, offline=self.offline_mode))
         elif button_id == "train-btn":
             screen = TrainScreen()
             defaults = getattr(self, "training_defaults", None)
