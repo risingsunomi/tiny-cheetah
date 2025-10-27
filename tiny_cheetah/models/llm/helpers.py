@@ -239,6 +239,7 @@ def generate(
         position_ids=position_ids
     ) # [B, S, V]
 
+    # prefill
     next_logit = logits[:, -1, :].flatten() # [B, V]
     tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
     tok = tok.item()
