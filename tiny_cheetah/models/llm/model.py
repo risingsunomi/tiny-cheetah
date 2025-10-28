@@ -32,6 +32,14 @@ class Model:
         self.output = tg.nn.Linear(self.config["embed_dim"], self.config["vocab_size"])
         if use_tied:
             self.output.weight = self.embed_tokens.weight
+
+    def reset_kv_cache(self) -> None:
+        for layer in self.layers:
+            if layer is None:
+                continue
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and getattr(attn, "kv_cache", None) is not None:
+                attn.kv_cache.clear()
     
     def __call__(
         self,

@@ -1,0 +1,80 @@
+Screen {
+    background: $surface;
+}
+
+#chat-root {
+    layout: vertical;
+    height: 1fr;
+    width: 100%;
+}
+
+#chat-body {
+    layout: horizontal;
+    height: 1fr;
+    padding: 1;
+}
+
+#chat-log {
+    width: 3fr;
+    height: 1fr;
+    border: solid $accent;
+    background: #050505;
+    color: $text;
+    padding: 1;
+    text-wrap: wrap;
+    overflow-y: auto;
+}
+
+.rich-log-line.system {
+    color: #00FF00;
+}
+
+.rich-log-line.user {
+    color: #3bd6ee;
+}
+
+.rich-log-line .model {
+    color: #ff0000;
+}
+
+.rich-log-line .model-label {
+    color: #ff0000;
+    text-style: bold;
+}
+
+#chat-side {
+    width: 1fr;
+    layout: vertical;
+    height: 1fr;
+    padding-left: 1;
+    margin-left: 1;
+}
+
+#model-panel,
+#nodes-panel,
+#stats-panel,
+#actions-panel {
+    border: round $primary;
+    padding: 1;
+    background: $surface-darken-1;
+    margin-bottom: 1;
+}
+
+#model-panel Button {
+    margin-top: 1;
+}
+
+.panel-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#chat-input {
+    margin: 0 1 1 1;
+    background: #050505;
+    color: $text;
+}
+
+Footer {
+    dock: bottom;
+}

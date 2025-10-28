@@ -16,9 +16,7 @@ class TransformerBlock:
         )
         self.self_attn = MultiHeadAttention(
             config=config,
-            is_causal=any("CausalLM" in arch for arch in config["architectures"]),
-            use_norm_k=False,
-            use_norm_q=False
+            is_causal=any("CausalLM" in arch for arch in config["architectures"])
         )
         self.post_attention_layernorm = tg.nn.RMSNorm(config["embed_dim"])
 

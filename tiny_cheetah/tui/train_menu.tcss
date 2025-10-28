@@ -1,0 +1,175 @@
+Screen {
+    background: $surface;
+}
+
+#train-root {
+    layout: horizontal;
+    height: 1fr;
+    width: 100%;
+    padding: 1;
+}
+
+#train-left,
+#train-right {
+    height: 1fr;
+}
+
+#train-left {
+    width: 2fr;
+    layout: vertical;
+    padding-right: 1;
+}
+
+#train-right {
+    width: 1fr;
+    layout: vertical;
+    padding-left: 1;
+}
+
+#train-right-scroll {
+    height: 1fr;
+}
+
+#train-right-content {
+    padding-right: 1;
+}
+
+#model-banner {
+    height: 2;
+    content-align: center middle;
+    border: solid $primary;
+    margin-bottom: 1;
+}
+
+#train-log {
+    height: 1fr;
+    min-height: 85%;
+    border: round $success;
+    padding: 0;
+    margin-bottom: 1;
+    background: #000000;
+    color: #00FF00;
+}
+
+#control-row {
+    layout: horizontal;
+    padding-top: 1;
+}
+
+#control-row Button {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#control-row Button#back-to-menu {
+    margin-right: 0;
+}
+
+#stats-panel,
+#settings-panel,
+#resource-panel {
+    border: round $primary;
+    padding: 1;
+    layout: vertical;
+    background: $surface-darken-1;
+    padding-bottom: 2;
+}
+
+#stats-panel,
+#settings-panel {
+    margin-bottom: 1;
+}
+
+#resource-panel {
+    height: auto;
+}
+
+#stats-panel Label,
+#resource-panel Label {
+    padding-left: 1;
+}
+
+#settings-panel Label {
+    margin-bottom: 1;
+}
+
+#open-settings {
+    margin-top: 1;
+}
+
+#settings-title {
+    text-style: bold;
+}
+
+#active-args {
+    color: $text-muted;
+    padding-top: 1;
+    min-height: 2;
+    text-wrap: wrap;
+}
+
+ModalScreen#train-settings {
+    align: center middle;
+}
+
+#settings-modal-container {
+    background: $surface;
+    border: round $primary;
+    width: 90%;
+    max-width: 120;
+    padding: 1 2;
+    layout: vertical;
+    height: 90%;
+    max-height: 90%;
+}
+
+#settings-modal-title {
+    text-align: center;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#settings-scroll {
+    height: 1fr;
+    overflow-y: auto;
+    padding-right: 1;
+}
+
+#settings-columns {
+    layout: horizontal;
+    padding-right: 3;
+    padding-left: 3;
+}
+
+.settings-column {
+    layout: vertical;
+    width: 1fr;
+    padding-right: 1;
+    padding-left: 1;
+    padding-bottom: 1;
+}
+
+.settings-field-label {
+    text-style: bold;
+}
+
+.settings-field-input {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+Checkbox.settings-field-input {
+    align: left middle;
+    width: auto;
+}
+
+#settings-modal-buttons {
+    layout: horizontal;
+    align: right middle;
+    margin-top: 1;
+    padding-top: 1;
+}
+
+#settings-apply {
+    margin-left: 1;
+}

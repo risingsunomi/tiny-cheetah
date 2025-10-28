@@ -24,8 +24,9 @@ class KVCache:
         ).contiguous().realize()
         self.cache_pos = 0
 
-    def reset(self):
-        self.cache_kv = None
+    def clear(self) -> None:
+        """Reset cached keys/values without dropping allocated tensor."""
+        self.cache_kv = tg.Tensor.zeros_like(self.cache_kv).contiguous().realize()
         self.cache_pos = 0
 
     def update(self, xk: tg.Tensor, xv: tg.Tensor) -> None:

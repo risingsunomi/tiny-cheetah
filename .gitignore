@@ -220,3 +220,9 @@ __marimo__/
 
 # apple
 .DS_Store
+
+# training
+checkpoints/
+logs/
+data/
+datasets/

@@ -22,18 +22,18 @@ class RotaryPositionalEmbedding:
     def __init__(
         self,
         dim: int,
-        max_seq_len: int,
-        theta: float = 100000.0,
+        max_seq_len: int = 4096,
+        base: float = 100000.0,
         is_scaling: bool = False,
-        scale_factor: float = 8.0,
-        low_freq_factor: float = 1.0,
-        high_freq_factor: float = 1.0,
-        old_context_len: int = 8192,
+        scale_factor: Optional[float] = None,
+        low_freq_factor: Optional[float] = None,
+        high_freq_factor: Optional[float] = None,
+        old_context_len: Optional[int] = None,
         dtype = tg.dtypes.half
     ):
         self.dim = dim
         self.max_seq_len = max_seq_len
-        self.theta = theta
+        self.base = base
         self.is_scaling = is_scaling
         self.low_freq_factor = low_freq_factor
         self.high_freq_factor = high_freq_factor
@@ -41,9 +41,10 @@ class RotaryPositionalEmbedding:
         self.scale_factor = scale_factor
         self.cache = None
         self.dtype = dtype
+        self.cache_built = False
 
-        # precompute freqs
-        self.freqs = 1.0 / (self.theta ** (
+        # precompute theta
+        self.theta = 1.0 / (self.base ** (
             tg.Tensor.arange(
                 0,
                 self.dim,
@@ -52,42 +53,24 @@ class RotaryPositionalEmbedding:
         ))
     
         if self.is_scaling:
-            self.freqs = self.apply_scaling(self.freqs)
+            self.theta = self.apply_scaling(self.theta)
 
-        end = self.max_seq_len * 2
-        self.freqs = tg.Tensor.arange(end).unsqueeze(dim=1) * self.freqs.unsqueeze(dim=0)
-        self.freqs = tg.Tensor.stack(
-            self.freqs.cos().cast(self.dtype),
-            self.freqs.sin().cast(self.dtype), 
-            dim=-1
-        ).reshape(
+    def build_rope_cache(self, device) -> tg.Tensor:
+        seq_idx = tg.Tensor.arange(self.max_seq_len * 2, device=device).float()
+        self.freqs = (seq_idx.unsqueeze(1) * self.theta.unsqueeze(0))
+
+        self.cache = tg.Tensor.stack([
+           self.freqs.cos(),
+           self.freqs.sin()
+        ], dim=-1).reshape(
             1,
-            end,
+            self.max_seq_len * 2,
             1,
-            self.dim//2,
+            self.dim // 2,
             2
         )
 
-    # def build_rope_cache(self) -> tg.Tensor:
-    #     seq_idx = tg.Tensor.arange(self.max_seq_len)
-    #     idx_theta = tg.Tensor.einsum(
-    #         "i, j -> ij", seq_idx, self.theta).float()
-    #     self.cache = tg.Tensor.stack([
-    #         tg.Tensor.cos(idx_theta),
-    #         tg.Tensor.sin(idx_theta)
-    #     ], dim=-1)
-
-    def build_rope_cache(self, device) -> tg.Tensor:
-        half = self.dim // 2
-        self.theta = (1.0 / (self.base ** (
-            tg.Tensor.arange(0, self.dim, 2, device=device).float() / self.dim
-        )))[:half].float()
-        seq_idx = tg.Tensor.arange(self.max_seq_len, device=device).float()
-        idx_theta = tg.Tensor.einsum("s,d->sd", seq_idx, self.theta).float()
-        self.cache = tg.Tensor.stack([
-            idx_theta.cos(),
-            idx_theta.sin()
-        ], dim=-1)
+        self.cache_built = True
 
     def apply_scaling(
         self,
@@ -124,34 +107,22 @@ class RotaryPositionalEmbedding:
         k: tg.Tensor, # [B, S, Hk, D]
         position_ids: Optional[tg.Tensor] = None
     ) -> Tuple[tg.Tensor, tg.Tensor]:
-        # if self.cache is None:
-        #     self.build_rope_cache(q.device)
+        if not self.cache_built:
+            self.build_rope_cache(q.device)
 
         """
         Returns rotated (q,k). Handles position_ids as [S], [B,S], or None.
         """
-        B, S, Hq, D = q.shape
-        _, _, Hk, Dk = k.shape
+        D = q.shape[-1]
+        Dk = k.shape[-1]
         assert D % 2 == 0 and Dk == D, "q/k head dims must match and be even"
 
-        # positions -> [S]
-        if position_ids is None:
-            pos = tg.Tensor.arange(S, device=q.device)
-        else:
-            pos = position_ids
-            if pos.ndim == 2:  # [B,S] -> take row 0 (RoPE equal across batch)
-                pos = pos[0]
-            elif pos.ndim == 0:
-                pos = pos.reshape(1)
-
         # reshape into complex pairs
-        q_pairs = q.reshape(B, S, Hq, D // 2, 2).float()
-        k_pairs = k.reshape(B, S, Hk, D // 2, 2).float()
+        q_pairs = q.reshape(*q.shape[0:-1], -1, 2).float()
+        k_pairs = k.reshape(*k.shape[0:-1], -1, 2).float()
 
-        # select cos/sin for the provided positions and move to the correct device
-        # self.freqs shape: [1, 2*max_seq_len, 1, D/2, 2]
-        table = self.freqs.to(q.device)
-        cs = table[:, pos.cast(tg.dtypes.default_int), :, :, :]  # [1, S, 1, D/2, 2]
+        # select cos/sin for the provided positions from cache
+        cs = self.cache[:, position_ids.cast(tg.dtypes.default_int), :, :, :]
 
         # split into cos/sin and apply rotation via complex multiply
         C, D_ = cs[..., 0:1], cs[..., 1:2]                      # [1, S, 1, D/2, 1]
