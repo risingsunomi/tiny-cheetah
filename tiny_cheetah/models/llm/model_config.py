@@ -87,7 +87,7 @@ class ModelConfig:
         else:
             self.model_config["qk_norm"] = False
 
-        custom_seq = os.getenv("XOT_MAX_SEQ_LEN")
+        custom_seq = os.getenv("TC_MAX_SEQ_LEN")
         if custom_seq is not None:
             self.model_config["max_seq_len"] = custom_seq
 
