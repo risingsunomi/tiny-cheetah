@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import inspect
 from pathlib import Path
-from typing import Iterable, List
+from typing import Awaitable, Callable, Iterable, List
 
 import requests
-import asyncio
 
 from tiny_cheetah.models.llm.model_config import ModelConfig
 
@@ -31,8 +32,21 @@ class RepoCustom:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.model_config = ModelConfig()
 
-    async def download(self, extra_files: Iterable[str] | None = None, revision: str = "main") -> tuple[Path, ModelConfig, List[str]]:
+    async def download(
+        self,
+        extra_files: Iterable[str] | None = None,
+        revision: str = "main",
+        progress_callback: Callable[[str], Awaitable[None] | None] | None = None,
+    ) -> tuple[Path, ModelConfig, List[str]]:
         messages: List[str] = []
+
+        async def emit(message: str) -> None:
+            messages.append(message)
+            if progress_callback is None:
+                return
+            result = progress_callback(message)
+            if inspect.isawaitable(result):
+                await result
 
         if os.path.exists(self.base_dir) and any(self.base_dir.iterdir()):
             self._load_configs()
@@ -51,11 +65,14 @@ class RepoCustom:
         if not download_files:
             download_files = repo_files  # fallback, grab everything available
 
-        for filename in download_files:
-            messages.append(f"Downloading {filename}")
+        total_files = len(download_files)
+        for index, filename in enumerate(download_files, start=1):
+            await emit(f"Downloading {index}/{total_files}: {filename}")
             await self._download_file(filename, revision)
+            await emit(f"Finished {index}/{total_files}: {filename}")
 
         self._load_configs()
+        await emit("Download complete.")
         return self.base_dir, self.model_config, messages
 
     def _load_configs(self) -> None:

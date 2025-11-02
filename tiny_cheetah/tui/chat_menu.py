@@ -375,10 +375,10 @@ class ChatScreen(Screen[None]):
             if RepoCustom is None:
                 return await self._handle_load_failure("Custom repo handler not available. Please use huggingface_hub library.")
             repo = RepoCustom(self._model_id)
-            model_path, model_config, repo_messages = await repo.download()
-            await self._log_sys_msg_async(f"repo download done: {model_path}, {model_config}, {repo_messages}")
-            for msg in repo_messages:
-                self._log_sys_msg(f"[download] {msg}")
+            async def download_progress(message: str) -> None:
+                await self._log_sys_msg_async(f"[download] {message}")
+            model_path, model_config, _ = await repo.download(progress_callback=download_progress)
+            await self._log_sys_msg_async(f"repo download done: {model_path}, {model_config}")
             self._log_sys_msg(f"Model cached at {model_path}")
             tokenizer_source = str(model_path)
             tokenizer_local = True
