@@ -358,7 +358,7 @@ class ChatScreen(Screen[None]):
             if RepoCustom is None:
                 raise RuntimeError("huggingface_hub is required to download models.")
             repo = RepoCustom(self._model_id)
-            model_path, model_config, repo_messages = await asyncio.to_thread(repo.download)
+            model_path, model_config, repo_messages = repo.download()
             for msg in repo_messages:
                 self._log_sys_msg(f"[download] {msg}")
             self._log_sys_msg(f"Model cached at {model_path}")
