@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Iterable, List
 
 import requests
+import asyncio
 
 from tiny_cheetah.models.llm.model_config import ModelConfig
-
 
 DEFAULT_FILES = {
     "config.json",
@@ -31,14 +31,14 @@ class RepoCustom:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.model_config = ModelConfig()
 
-    def download(self, extra_files: Iterable[str] | None = None, revision: str = "main") -> tuple[Path, ModelConfig, List[str]]:
+    async def download(self, extra_files: Iterable[str] | None = None, revision: str = "main") -> tuple[Path, ModelConfig, List[str]]:
         messages: List[str] = []
 
-        if os.path.exists(self.base_dir):
+        if os.path.exists(self.base_dir) and any(self.base_dir.iterdir()):
             self._load_configs()
             return self.base_dir, self.model_config, messages
 
-        repo_tree = self._fetch_file_list(revision)
+        repo_tree = await self._fetch_file_list(revision)
         repo_files = [entry["path"] for entry in repo_tree if entry.get("type") == "file"]
 
         wanted = set(DEFAULT_FILES)
@@ -53,7 +53,7 @@ class RepoCustom:
 
         for filename in download_files:
             messages.append(f"Downloading {filename}")
-            self._download_file(filename, revision)
+            await self._download_file(filename, revision)
 
         self._load_configs()
         return self.base_dir, self.model_config, messages
@@ -67,11 +67,11 @@ class RepoCustom:
         if gen_config.exists():
             self.model_config.load_generation_config(gen_config)
 
-    def _fetch_file_list(self, revision: str) -> list[dict]:
+    async def _fetch_file_list(self, revision: str) -> list[dict]:
         token = os.getenv("HF_TOKEN")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         url = f"https://huggingface.co/api/models/{self.model_name}/tree/{revision}"
-        response = requests.get(url, headers=headers, params={"recursive": 1}, timeout=120)
+        response = await asyncio.to_thread(requests.get, url, headers=headers, params={"recursive": 1}, timeout=120)
         if response.status_code != 200:
             raise RuntimeError(
                 f"Failed to fetch file list for {self.model_name}@{revision}: "
@@ -82,11 +82,11 @@ class RepoCustom:
             raise RuntimeError("Unexpected response when listing repository files.")
         return tree
 
-    def _download_file(self, filename: str, revision: str) -> None:
+    async def _download_file(self, filename: str, revision: str) -> None:
         token = os.getenv("HF_TOKEN")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         base_url = f"https://huggingface.co/{self.model_name}/resolve/{revision}/{filename}"
-        response = requests.get(base_url, headers=headers, stream=True, timeout=60)
+        response = await asyncio.to_thread(requests.get, base_url, headers=headers, stream=True, timeout=60)
         if response.status_code != 200:
             raise RuntimeError(f"Failed to download {filename}: {response.status_code} {response.text}")
         destination = self.base_dir / filename

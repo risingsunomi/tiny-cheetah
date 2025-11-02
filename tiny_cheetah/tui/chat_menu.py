@@ -32,6 +32,9 @@ from textual.message_pump import MessagePump
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class ChatModelSelected(Message):
     def __init__(self, sender: MessagePump, model_id: str) -> None:
@@ -259,16 +262,25 @@ class ChatScreen(Screen[None]):
         self._append_system(f"Loading model '{self._model_id}'...")
         self._log_sys_msg("Preparing model load…")
 
-        async def load_task() -> None:
-            try:
-                model, model_config, tokenizer, model_path, elapsed = await self._load_model_async()
-            except Exception as exc:  # pragma: no cover - runtime safety
-                await self._handle_load_failure(str(exc))
-                return
-            await self._handle_load_success(model, model_config, tokenizer, model_path, elapsed)
-
-        self._loading_task = asyncio.create_task(load_task())
+        # loaded_model = self._load_model()
+        self._loading_task = asyncio.create_task(self._load_model_task())
         self._loading_task.add_done_callback(self._on_load_task_finished)
+    
+    async def _load_model_task(self) -> None:
+        try:
+            model, model_config, tokenizer, model_path, elapsed = await self._load_model_async()
+        except Exception as exc:
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            await self._handle_load_failure(str(exc))
+            return
+        await self._handle_load_success(
+            model,
+            model_config,
+            tokenizer,
+            model_path,
+            elapsed
+        )
+        return
 
     async def _handle_load_failure(self, message: str) -> None:
         self._log_sys_msg(f"Error loading model: {message}")
@@ -345,20 +357,26 @@ class ChatScreen(Screen[None]):
         elif cache_path.exists():
             resolved_path = cache_path
 
-        if resolved_path is not None:
+        local_model = False
+        print(f"resolved_path: {resolved_path}")
+        if resolved_path is not None and any(resolved_path.glob("*.*")):
             self._log_sys_msg_async(f"Loading local model from {resolved_path}")
+            local_model = True
             # model_path, model_config = await asyncio.to_thread(self._load_local_config, resolved_path)
             model_path, model_config = self._load_local_config(resolved_path)
             tokenizer_source = str(model_path)
             tokenizer_local = True
         elif self._offline:
-            raise RuntimeError("Offline mode requires cached model weights.")
-        else:
+            return await self._handle_load_failure("Model not found in cache for offline mode.")
+        
+        if not local_model:
+            logger.info(f"not local model downloading {self._model_id}")
             self._log_sys_msg(f"Downloading model from Hugging Face: {self._model_id}")
             if RepoCustom is None:
-                raise RuntimeError("huggingface_hub is required to download models.")
+                return await self._handle_load_failure("Custom repo handler not available. Please use huggingface_hub library.")
             repo = RepoCustom(self._model_id)
-            model_path, model_config, repo_messages = repo.download()
+            model_path, model_config, repo_messages = await repo.download()
+            await self._log_sys_msg_async(f"repo download done: {model_path}, {model_config}, {repo_messages}")
             for msg in repo_messages:
                 self._log_sys_msg(f"[download] {msg}")
             self._log_sys_msg(f"Model cached at {model_path}")
