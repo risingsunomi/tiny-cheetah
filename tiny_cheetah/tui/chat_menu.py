@@ -8,7 +8,7 @@ import inspect
 import os
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, List, Optional
 import traceback
 
 import tinygrad as tg
@@ -22,6 +22,7 @@ from tiny_cheetah.models.llm.model_config import ModelConfig
 from tiny_cheetah.models.llm.shard import Shard
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.repos import RepoCustom
+from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -30,11 +31,12 @@ from textual.events import Mount
 from textual.message import Message
 from textual.message_pump import MessagePump
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, RichLog, Static
 
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+MAX_RESTORED_MESSAGES = 20
 
 class ChatModelSelected(Message):
     def __init__(self, sender: MessagePump, model_id: str) -> None:
@@ -65,7 +67,7 @@ class ChatScreen(Screen[None]):
         self._model_config: Optional[object] = None
         self._tokenizer: Optional[AutoTokenizer] = None
         self._model_cache_path: Optional[Path] = None
-        self._history: List[Dict[str, str]] = []
+        self._history: List[dict[str, str]] = []
         self._generating_resp = False
         self.out_tokens: List[int] = []
         self._loading_in_progress = False
@@ -74,11 +76,21 @@ class ChatScreen(Screen[None]):
         self._post_load_callbacks: List[Callable[[], Optional[Awaitable[None]]]] = []
         self._pending_generation = False
         self._load_button: Optional[Button] = None
+        self._chat_log_list: Optional[ListView] = None
+        self._log_storage = ChatLogStorage()
+        self._current_log_id: Optional[int] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="chat-root"):
             with Container(id="chat-body"):
+                with Container(id="chat-history"):
+                    yield Label("Chat Logs", classes="panel-title")
+                    history_list = ListView(id="chat-log-list")
+                    self._chat_log_list = history_list
+                    yield history_list
+                    yield Button("New Log", id="new-chat-log", variant="primary")
+                    yield Button("Load Log", id="load-chat-log")
                 yield RichLog(id="chat-log", markup=True, auto_scroll=True, wrap=True)
                 with Container(id="chat-side"):
                     with Static(id="model-panel"):
@@ -105,13 +117,14 @@ class ChatScreen(Screen[None]):
             yield Input(placeholder="Type a prompt and press Enter…", id="chat-input")
         yield Footer()
 
-    def on_mount(self, _: Mount) -> None:
+    async def on_mount(self, _: Mount) -> None:
         self._chat_log = self.query_one("#chat-log", RichLog)
         self._input = self.query_one("#chat-input", Input)
         if self._input is not None:
             self.call_after_refresh(self._input.focus)
         if self._model_label is not None:
             self._model_label.update(self._model_id or "<select>")
+        await self._initialize_chat_logs()
 
     def action_open_model_picker(self) -> None:
         self._open_model_picker()
@@ -121,10 +134,10 @@ class ChatScreen(Screen[None]):
             self._open_model_picker()
         elif event.button.id == "load-model":
             if not self._model_id:
-                self._append_system("Select a model first.")
+                self._log_sys_msg("Select a model first.")
                 return
             if self._model is not None and self._tokenizer is not None:
-                self._append_system("Model already loaded.")
+                self._log_sys_msg("Model already loaded.")
                 return
             await self._start_model_load()
         elif event.button.id == "chat-back":
@@ -132,6 +145,10 @@ class ChatScreen(Screen[None]):
             self.app.pop_screen()
         elif event.button.id == "clear-model":
             self._clear_model()
+        elif event.button.id == "new-chat-log":
+            await self._create_new_log()
+        elif event.button.id == "load-chat-log":
+            await self._load_selected_chat_log()
 
     def _open_model_picker(self) -> None:
         self.app.push_screen(ModelPickerScreen(self._model_id or ""), self._handle_model_selected)
@@ -151,8 +168,9 @@ class ChatScreen(Screen[None]):
         self._model_id = result
         if self._model_label is not None:
             self._model_label.update(result)
-        self._append_system(f"Model set to '{result}'.")
-        self._append_system("Click 'Load Model' to download weights into memory.")
+        asyncio.create_task(self._update_current_log_model_async())
+        self._log_sys_msg(f"Model set to '{result}'.")
+        self._log_sys_msg("Click 'Load Model' to download weights into memory.")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":
@@ -160,21 +178,24 @@ class ChatScreen(Screen[None]):
             if not content:
                 return
             event.input.value = ""
+            if self._current_log_id is None:
+                self._log_sys_msg("Create or load a chat log before chatting.")
+                return
             if not self._model_id:
-                self._append_system("Select a model before chatting (Ctrl+S).")
+                self._log_sys_msg("Select a model before chatting (Ctrl+S).")
                 return
             if self._generating_resp:
-                self._append_system("Model is generating a response; please wait...")
+                self._log_sys_msg("Model is generating a response; please wait...")
                 return
             if self._loading_in_progress:
-                self._append_system("Model load in progress. Please wait…")
+                self._log_sys_msg("Model load in progress. Please wait…")
                 return
 
             self._append_user(content)
             self._history.append({"role": "user", "content": content})
 
             if self._model is None or self._tokenizer is None:
-                self._append_system("Loading model now...")
+                self._log_sys_msg("Loading model now...")
                 self._pending_generation = True
                 await self._start_model_load(self._continue_generation)
                 return
@@ -183,23 +204,224 @@ class ChatScreen(Screen[None]):
             self._schedule_generation()
 
 
-    def _append_user(self, content: str) -> None:
-        if self._chat_log is not None:
-            text = escape(content)
-            self._chat_log.write(
-                f"({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) [bold][#3bd6ee]User[/][/bold]: {text}\n"
-            )
+    def _append_user(
+        self,
+        content: str,
+        persist: bool = True,
+        timestamp: Optional[str] = None
+    ) -> None:
+        if self._chat_log is None:
+            return
+        entry_time = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = escape(content)
+        self._write_to_chat_log(
+            f"({entry_time}) [bold][#3bd6ee]User[/][/bold]: {text}\n"
+        )
+        if persist:
+            self._record_message("user", content, entry_time)
 
-    def _append_system(self, content: str) -> None:
-        if self._chat_log is not None:
-            text = escape(content)
-            self._chat_log.write(
-                f"({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) [bold][#00FF00]System[/][/bold]: {text}\n"
-            )
+    def _append_system(
+        self,
+        content: str,
+        persist: bool = True,
+        timestamp: Optional[str] = None
+    ) -> None:
+        if self._chat_log is None:
+            return
+        entry_time = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = escape(content)
+        self._write_to_chat_log(
+            f"({entry_time}) [bold][#00FF00]System[/][/bold]: {text}\n"
+        )
+        if persist:
+            self._record_message("system", content, entry_time)
+
+    def _append_model(
+        self,
+        content: str,
+        persist: bool = True,
+        timestamp: Optional[str] = None
+    ) -> None:
+        if self._chat_log is None:
+            return
+        entry_time = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        label = escape(self._model_id or "Model")
+        text = escape(content)
+        self._write_to_chat_log(
+            f"({entry_time}) [bold][#ff0000]{label}[/][/bold]: {text}\n"
+        )
+        if persist:
+            self._record_message("assistant", content, entry_time)
+            
+    def _write_to_chat_log(self, message: str) -> None:
+        if self._chat_log is None:
+            return
+        self._chat_log.write(message)
+        scroll_end = getattr(self._chat_log, "scroll_end", None)
+        if callable(scroll_end):
+            scroll_end(animate=False)
+            return
+        action_scroll_end = getattr(self._chat_log, "action_scroll_end", None)
+        if callable(action_scroll_end):
+            action_scroll_end()
+
+    def _record_message(self, role: str, content: str, timestamp: str) -> None:
+        if self._current_log_id is None:
+            return
+        try:
+            self._log_storage.append_message(self._current_log_id, role, content, timestamp)
+        except Exception as exc:  # pragma: no cover - logging defensive path
+            logger.exception("Failed to record chat message: %s", exc)
 
     def _set_load_button_enabled(self, enabled: bool) -> None:
         if self._load_button is not None:
             self._load_button.disabled = not enabled
+
+    async def _initialize_chat_logs(self) -> None:
+        summaries = self._log_storage.list_logs()
+        if not summaries:
+            default_name = datetime.now().strftime("Session %Y-%m-%d %H:%M:%S")
+            new_id = self._log_storage.create_log(default_name, self._model_id or "")
+            summaries = self._log_storage.list_logs()
+            self._current_log_id = new_id
+        else:
+            self._current_log_id = summaries[0]["id"]
+        summaries = await self._refresh_chat_log_list(select_id=self._current_log_id, summaries=summaries)
+        if self._current_log_id is None:
+            return
+        current_log = self._log_storage.get_log(self._current_log_id)
+        if current_log is not None:
+            stored_model = current_log["model_id"] or ""
+            if stored_model:
+                self._model_id = stored_model
+                if self._model_label is not None:
+                    self._model_label.update(self._model_id or "<select>")
+        messages = self._log_storage.get_messages(self._current_log_id, limit=MAX_RESTORED_MESSAGES)
+        if self._chat_log is not None:
+            self._chat_log.clear()
+        self._history.clear()
+        self._restore_messages_to_view(messages, persist=False)
+
+    async def _refresh_chat_log_list(
+        self,
+        select_id: Optional[int] = None,
+        summaries: Optional[List[ChatLogSummary]] = None
+    ) -> List[ChatLogSummary]:
+        if summaries is None:
+            summaries = self._log_storage.list_logs()
+        list_view = self._chat_log_list
+        if list_view is None:
+            return summaries
+        await list_view.clear()
+        for summary in summaries:
+            item = self._build_log_item(summary)
+            list_view.mount(item)
+        target_id = select_id
+        if target_id is None and summaries:
+            target_id = summaries[0]["id"]
+        if target_id is not None:
+            self._highlight_log(target_id)
+        return summaries
+
+    def _build_log_item(self, summary: ChatLogSummary) -> ListItem:
+        label_text = f"{summary['name']} ({summary['model_id'] or 'no model'})"
+        label = Label(label_text)
+        return ListItem(label, id=f"log-{summary['id']}")
+
+    def _highlight_log(self, log_id: int) -> None:
+        if self._chat_log_list is None:
+            return
+        for index, child in enumerate(self._chat_log_list.children):
+            if getattr(child, "id", "") == f"log-{log_id}":
+                try:
+                    self._chat_log_list.index = index  # type: ignore[attr-defined]
+                except AttributeError:
+                    pass
+                break
+
+    def _get_selected_log_id(self) -> Optional[int]:
+        if self._chat_log_list is None:
+            return None
+        index = getattr(self._chat_log_list, "index", None)
+        if index is None:
+            return None
+        try:
+            child = self._chat_log_list.children[index]
+        except IndexError:
+            return None
+        if child.id and child.id.startswith("log-"):
+            try:
+                return int(child.id.split("-", 1)[1])
+            except ValueError:
+                return None
+        return None
+
+    async def _create_new_log(self) -> None:
+        name = datetime.now().strftime("Session %Y-%m-%d %H:%M:%S")
+        try:
+            new_id = self._log_storage.create_log(name, self._model_id or "")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._log_sys_msg(f"Failed to create new log: {exc}")
+            return
+        self._current_log_id = new_id
+        await self._refresh_chat_log_list(select_id=new_id)
+        if self._chat_log is not None:
+            self._chat_log.clear()
+        self._history.clear()
+        self._log_sys_msg(f"Created log '{name}'.")
+
+    async def _load_selected_chat_log(self) -> None:
+        log_id = self._get_selected_log_id()
+        if log_id is None:
+            self._log_sys_msg("Select a chat log to load.")
+            return
+        await self._handle_chat_log_load(log_id)
+
+    async def _handle_chat_log_load(self, log_id: int) -> None:
+        summary = self._log_storage.get_log(log_id)
+        if summary is None:
+            self._log_sys_msg("Chat log not found.")
+            return
+        messages = self._log_storage.get_messages(log_id, limit=MAX_RESTORED_MESSAGES)
+        self._current_log_id = log_id
+        self._highlight_log(log_id)
+        self._clear_model()
+        if self._chat_log is not None:
+            self._chat_log.clear()
+        self._history.clear()
+        self._model_id = summary["model_id"] or ""
+        if self._model_label is not None:
+            self._model_label.update(self._model_id or "<select>")
+        self._restore_messages_to_view(messages, persist=False)
+        if self._model_id:
+            await self._start_model_load()
+        else:
+            self._log_sys_msg("No model associated with this log. Select one to continue.")
+
+    def _restore_messages_to_view(self, messages: List[ChatMessage], persist: bool) -> None:
+        for message in messages:
+            role = message["role"]
+            content = message["content"]
+            timestamp = message["timestamp"]
+            if role == "user":
+                self._append_user(content, persist=persist, timestamp=timestamp)
+                self._history.append({"role": "user", "content": content})
+            elif role == "assistant":
+                self._append_model(content, persist=persist, timestamp=timestamp)
+                self._history.append({"role": "assistant", "content": content})
+            else:
+                self._append_system(content=content, persist=persist, timestamp=timestamp)
+        if len(self._history) > 6:
+            self._history = self._history[-6:]
+
+    async def _update_current_log_model_async(self) -> None:
+        if self._current_log_id is None:
+            return
+        try:
+            self._log_storage.set_log_model(self._current_log_id, self._model_id or "")
+            await self._refresh_chat_log_list(select_id=self._current_log_id)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Failed to update log model mapping: %s", exc)
 
     def _schedule_generation(self) -> None:
         if self._generation_task is not None and not self._generation_task.done():
@@ -220,15 +442,7 @@ class ChatScreen(Screen[None]):
             task.result()
         except Exception as exc:
             traceback.print_exception(type(exc), exc, exc.__traceback__)
-            self._append_system(f"Error: {exc}")
-
-    def _append_model(self, content: str) -> None:
-        if self._chat_log is not None:
-            label = escape(self._model_id or "Model")
-            text = escape(content)
-            self._chat_log.write(
-                f"({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) [bold][#ff0000]{label}[/][/bold]: {text}\n"
-            )
+            self._log_sys_msg(f"Error: {exc}")
 
     @staticmethod
     def _config_get(config: object, key: str, default=None):
@@ -246,12 +460,12 @@ class ChatScreen(Screen[None]):
         on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None
     ) -> None:
         if self._loading_in_progress:
-            self._append_system("Model load already in progress…")
+            self._log_sys_msg("Model load already in progress…")
             if on_complete is not None:
                 self._post_load_callbacks.append(on_complete)
             return
         if not self._model_id:
-            self._append_system("No model selected to load.")
+            self._log_sys_msg("No model selected to load.")
             return
 
         if on_complete is not None:
@@ -259,7 +473,7 @@ class ChatScreen(Screen[None]):
 
         self._loading_in_progress = True
         self._set_load_button_enabled(False)
-        self._append_system(f"Loading model '{self._model_id}'...")
+        self._log_sys_msg(f"Loading model '{self._model_id}'...")
         self._log_sys_msg("Preparing model load…")
 
         # loaded_model = self._load_model()
@@ -325,10 +539,10 @@ class ChatScreen(Screen[None]):
             pass
 
     def _log_sys_msg(self, message: str) -> None:
-        self._append_system(message)
+        self._append_system(message, persist=False)
     
     async def _log_sys_msg_async(self, message: str) -> Awaitable[None]:
-        await asyncio.to_thread(self._append_system, message)
+        await asyncio.to_thread(self._append_system, message, False)
 
     def _continue_generation(self) -> Optional[Awaitable[None]]:
         if not self._pending_generation:
@@ -464,12 +678,12 @@ class ChatScreen(Screen[None]):
         top_p = self._config_get(self._model_config, "top_p", 0.8) or 0.8
 
         if self._generating_resp:
-            self._append_system("Model is already generating a response.")
+            self._log_sys_msg("Model is already generating a response.")
             return
 
         self._generating_resp = True
         try:
-            await asyncio.to_thread(self._append_model, "Thinking...")
+            await asyncio.to_thread(self._append_model, "Thinking...", False)
             result = streaming_generate(
                 self._model,
                 input_ids,
@@ -502,7 +716,7 @@ class ChatScreen(Screen[None]):
             self._history = self._history[-6:]
 
     def _clear_model(self) -> None:
-        self._append_system("Clearing loaded model.")
+        self._log_sys_msg("Clearing loaded model.")
         if hasattr(self, "_model") and self._model is not None and hasattr(self._model, "reset_kv_cache"):
             self._model.reset_kv_cache()
         self._model = None
@@ -517,6 +731,4 @@ class ChatScreen(Screen[None]):
         self._pending_generation = False
         if not self._loading_in_progress:
             self._set_load_button_enabled(True)
-        if self._model_label is not None:
-            self._model_label.update("<select>")
-        self._append_system("Model cleared. Select and load a model to continue.")
+        self._log_sys_msg("Model cleared. Select and load a model to continue.")
