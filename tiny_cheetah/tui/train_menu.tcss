@@ -97,6 +97,12 @@ Screen {
     margin-top: 1;
 }
 
+#training-path-summary {
+    margin-top: 1;
+    color: $text-muted;
+    text-wrap: wrap;
+}
+
 #settings-title {
     text-style: bold;
 }

@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -15,8 +16,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Checkbox, Header, Input, Label, Log, Static
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
+from rich.markup import escape
 
+from tiny_cheetah.tui.training_path_types import TrainingNode, NODE_STATUS_STYLES, NODE_STATUS_SYMBOLS
+from tiny_cheetah.tui.training_path_screen import TrainingPathScreen
 try:
     import psutil  # type: ignore
 except Exception:  # pragma: no cover - psutil is optional at runtime
@@ -169,6 +173,12 @@ class TrainScreen(Screen[None]):
                 self._settings[name] = bool(default)
             else:
                 self._settings[name] = "" if default is None else str(default)
+        self._node_steps: List[TrainingNode] = [TrainingNode("Base Training")]
+        self._current_node_index: Optional[int] = None
+        self._path_summary_label: Optional[Label] = None
+        self._auto_training_runs = 1
+        self._stopped_by_user = False
+        self._sync_base_node_name()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -197,6 +207,10 @@ class TrainScreen(Screen[None]):
                             yield Button("Edit Settings", id="open-settings")
                             self._active_args_label = Label("Active Args: --", id="active-args")
                             yield self._active_args_label
+                            path_summary = Label("Training Path: Base only", id="training-path-summary")
+                            self._path_summary_label = path_summary
+                            yield path_summary
+                            yield Button("Training Path", id="open-training-path")
                         with Static(id="resource-panel"):
                             yield Label("CPU: --", id="resource-cpu")
                             yield Label("Memory: --", id="resource-ram")
@@ -240,6 +254,8 @@ class TrainScreen(Screen[None]):
             "model": self.query_one("#settings-model", Label),
             "data": self.query_one("#settings-data", Label),
         }
+        if self._path_summary_label is None:
+            self._path_summary_label = self.query_one("#training-path-summary", Label)
         self._update_settings_summary()
 
         self._poll_timer = self.set_interval(0.25, self._poll_training_output, pause=True)
@@ -248,6 +264,7 @@ class TrainScreen(Screen[None]):
         # Prime CPU stats if psutil is available to avoid the initial 0.0 reading.
         if psutil is not None:
             _ = psutil.cpu_percent(interval=None)
+        self._update_path_summary()
 
     def on_unmount(self) -> None:
         if self._poll_timer is not None:
@@ -272,6 +289,8 @@ class TrainScreen(Screen[None]):
                 self.app.pop_screen()
         elif button_id == "open-settings":
             self._open_settings()
+        elif button_id == "open-training-path":
+            self._open_training_path()
 
     def _open_settings(self) -> None:
         screen = TrainSettingsScreen(dict(self._settings))
@@ -289,6 +308,91 @@ class TrainScreen(Screen[None]):
                 self._settings[key] = "" if value is None else str(value).strip()
         self._update_settings_summary()
 
+    def _open_training_path(self) -> None:
+        if self._training is not None and self._training.is_running():
+            self._append_log("[warn] Stop training before editing the training path.")
+            return
+        screen = TrainingPathScreen(copy.deepcopy(self._node_steps))
+        self.app.push_screen(screen, self._on_training_path_result)
+
+    def _on_training_path_result(self, result: Optional[List[TrainingNode]]) -> None:
+        if result is None:
+            return
+        if not result:
+            result = [TrainingNode("Base Training")]
+        self._node_steps = result
+        self._current_node_index = None
+        self._auto_training_runs = 1
+        for node in self._node_steps:
+            if node.status not in NODE_STATUS_STYLES:
+                node.status = "pending"
+        self._sync_base_node_name()
+        self._append_log(f"[info] Training path updated ({len(self._node_steps)} step{'s' if len(self._node_steps) != 1 else ''}).")
+
+    def _prepare_node_for_run(self) -> Optional[int]:
+        self._stopped_by_user = False
+        index = self._find_next_node()
+        if index is None:
+            self._auto_training_runs += 1
+            name = f"Training Pass {self._auto_training_runs}"
+            self._node_steps.append(TrainingNode(name, repeated=True))
+            self._append_log(f"[info] Added repeat training step '{name}'.")
+            index = len(self._node_steps) - 1
+        self._current_node_index = index
+        self._set_node_status(index, "running")
+        return index
+
+    def _find_next_node(self) -> Optional[int]:
+        for idx, node in enumerate(self._node_steps):
+            if node.status != "complete":
+                return idx
+        return None
+
+    def _set_node_status(self, index: int, status: str) -> None:
+        if index < 0 or index >= len(self._node_steps):
+            return
+        self._node_steps[index].status = status
+        self._update_path_summary()
+
+    def _update_path_summary(self) -> None:
+        if self._path_summary_label is None:
+            return
+        total = len(self._node_steps)
+        if total == 0:
+            summary = "No steps defined"
+        else:
+            completed = sum(1 for node in self._node_steps if node.status == "complete")
+            running_node = next((node for node in self._node_steps if node.status == "running"), None)
+            pending_node = next((node for node in self._node_steps if node.status not in {"complete"}), None)
+            summary = f"{total} step{'s' if total != 1 else ''}"
+            if completed:
+                summary += f", {completed} done"
+            if running_node is not None:
+                summary += f", running '{running_node.name}'"
+            elif pending_node is not None:
+                summary += f", next '{pending_node.name}'"
+        self._path_summary_label.update(f"Training Path: {summary}")
+
+    def _derive_base_node_label(self) -> str:
+        model = str(
+            self._settings.get("model-id")
+            or self._settings.get("custom-model-id")
+            or self._settings.get("config-path")
+            or "Base Training"
+        ).strip()
+        if not model:
+            model = "Base Training"
+        max_len = 40
+        if len(model) > max_len:
+            model = model[: max_len - 3] + "..."
+        return f"Base: {model}"
+
+    def _sync_base_node_name(self) -> None:
+        if not self._node_steps:
+            return
+        self._node_steps[0].name = self._derive_base_node_label()
+        self._update_path_summary()
+
     def _start_training(self) -> None:
         if self._training is not None and self._training.is_running():
             self._append_log("[warn] Training is already running.")
@@ -303,8 +407,20 @@ class TrainScreen(Screen[None]):
             self._append_log(f"[error] Could not locate train.py at {script_path}")
             return
 
+        node_index = self._prepare_node_for_run()
+        if node_index is None:
+            self._append_log("[error] No available training step.")
+            return
+
         self._training = TrainingProcess(script_path, args)
-        self._training.start()
+        try:
+            self._training.start()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._append_log(f"[error] Failed to start training: {exc}")
+            self._set_node_status(node_index, "pending")
+            self._current_node_index = None
+            self._training = None
+            return
 
         self._stats = TrainingStats(status="Running")
         self._update_stats_display()
@@ -322,6 +438,7 @@ class TrainScreen(Screen[None]):
         if self._training is None or not self._training.is_running():
             self._append_log("[warn] No active training process.")
             return
+        self._stopped_by_user = True
         self._training.terminate()
         self._append_log("[info] Terminating training process...")
 
@@ -410,6 +527,14 @@ class TrainScreen(Screen[None]):
         self._update_stats_display()
         if self._poll_timer is not None:
             self._poll_timer.pause()
+        self._training = None
+        if self._current_node_index is not None:
+            if self._stopped_by_user:
+                self._set_node_status(self._current_node_index, "stopped")
+            else:
+                self._set_node_status(self._current_node_index, "complete")
+            self._current_node_index = None
+        self._stopped_by_user = False
 
     def _append_log(self, line: str) -> None:
         if self._log is None:
@@ -438,6 +563,7 @@ class TrainScreen(Screen[None]):
         if self._settings_summary:
             self._settings_summary["model"].update(f"Model: {model}")
             self._settings_summary["data"].update(f"Dataset: {data}")
+        self._sync_base_node_name()
 
     def _set_buttons(self, *, running: bool) -> None:
         start_btn = self.query_one("#start-training", Button)
@@ -498,6 +624,7 @@ class TrainScreen(Screen[None]):
         self._stat_labels["tokens"].update(f"Tokens: {self._stats.tokens}")
         self._stat_labels["tok_rate"].update(f"Tok/s: {tok_rate}")
 
+
     def _update_resource_usage(self) -> None:
         if psutil is not None:
             cpu = psutil.cpu_percent(interval=None)
@@ -517,70 +644,3 @@ class TrainScreen(Screen[None]):
 
         # GPU metrics placeholder (extend in future when integrations are available)
         self._resource_labels["gpu"].update("GPU: N/A")
-
-
-class TrainSettingsScreen(ModalScreen[Dict[str, object]]):
-    """Modal for editing training settings."""
-
-    CSS_PATH = Path(__file__).with_name("train_menu.tcss")
-
-    BINDINGS = [
-        Binding("escape", "dismiss", "Cancel"),
-    ]
-
-    def __init__(self, values: Dict[str, object]) -> None:
-        super().__init__(id="train-settings")
-        self._initial = dict(values)
-        self._inputs: Dict[str, Input | Checkbox] = {}
-
-    def compose(self) -> ComposeResult:
-        columns = 3 if len(SETTINGS_FIELDS) >= 9 else 2
-        per_column = math.ceil(len(SETTINGS_FIELDS) / columns)
-        with Container(id="settings-modal-container"):
-            yield Static("Training Settings", id="settings-modal-title")
-            with VerticalScroll(id="settings-scroll"):
-                with Container(id="settings-columns"):
-                    for chunk in chunked(SETTINGS_FIELDS, per_column):
-                        with Vertical(classes="settings-column"):
-                            for field in chunk:
-                                name = str(field["name"])
-                                label = str(field["label"])
-                                field_type = field.get("type", "text")
-                                yield Label(label, classes="settings-field-label")
-                                if field_type == "checkbox":
-                                    widget = Checkbox(id=f"settings-{name}")
-                                else:
-                                    placeholder = str(field.get("placeholder", ""))
-                                    widget = Input(id=f"settings-{name}", placeholder=placeholder)
-                                widget.add_class("settings-field-input")
-                                self._inputs[name] = widget
-                                yield widget
-            with Container(id="settings-modal-buttons"):
-                yield Button("Cancel", id="settings-cancel")
-                yield Button("Apply", id="settings-apply", variant="primary")
-
-    def on_mount(self) -> None:
-        for name, widget in self._inputs.items():
-            value = self._initial.get(name)
-            if isinstance(widget, Checkbox):
-                widget.value = bool(value)
-            elif value is not None:
-                widget.value = str(value)
-        first = self._inputs.get("model-id")
-        if isinstance(first, Input):
-            self.call_after_refresh(first.focus)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "settings-cancel":
-            self.dismiss(None)
-        elif event.button.id == "settings-apply":
-            self.dismiss(self._gather_values())
-
-    def _gather_values(self) -> Dict[str, object]:
-        result: Dict[str, object] = {}
-        for name, widget in self._inputs.items():
-            if isinstance(widget, Checkbox):
-                result[name] = widget.value
-            else:
-                result[name] = widget.value.strip()
-        return result

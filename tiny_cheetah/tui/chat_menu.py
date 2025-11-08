@@ -30,7 +30,7 @@ from textual.containers import Container
 from textual.events import Mount
 from textual.message import Message
 from textual.message_pump import MessagePump
-from textual.screen import Screen
+from textual.screen import Screen, ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, RichLog, Static
 
 import logging
@@ -89,8 +89,12 @@ class ChatScreen(Screen[None]):
                     history_list = ListView(id="chat-log-list")
                     self._chat_log_list = history_list
                     yield history_list
-                    yield Button("New Log", id="new-chat-log", variant="primary")
-                    yield Button("Load Log", id="load-chat-log")
+                    with Container(id="chat-log-actions"):
+                        yield Button("New Log", id="new-chat-log", variant="primary")
+                        yield Button("Load Log", id="load-chat-log")
+                    with Container(id="chat-log-secondary-actions"):
+                        yield Button("Rename Log", id="rename-chat-log")
+                        yield Button("Delete Log", id="delete-chat-log", variant="error")
                 yield RichLog(id="chat-log", markup=True, auto_scroll=True, wrap=True)
                 with Container(id="chat-side"):
                     with Static(id="model-panel"):
@@ -149,6 +153,10 @@ class ChatScreen(Screen[None]):
             await self._create_new_log()
         elif event.button.id == "load-chat-log":
             await self._load_selected_chat_log()
+        elif event.button.id == "rename-chat-log":
+            self._prompt_rename_selected_log()
+        elif event.button.id == "delete-chat-log":
+            self._confirm_delete_selected_log()
 
     def _open_model_picker(self) -> None:
         self.app.push_screen(ModelPickerScreen(self._model_id or ""), self._handle_model_selected)
@@ -315,7 +323,7 @@ class ChatScreen(Screen[None]):
         await list_view.clear()
         for summary in summaries:
             item = self._build_log_item(summary)
-            list_view.mount(item)
+            await list_view.mount(item)
         target_id = select_id
         if target_id is None and summaries:
             target_id = summaries[0]["id"]
@@ -324,9 +332,17 @@ class ChatScreen(Screen[None]):
         return summaries
 
     def _build_log_item(self, summary: ChatLogSummary) -> ListItem:
-        label_text = f"{summary['name']} ({summary['model_id'] or 'no model'})"
+        label_text = self._format_log_item_label(summary)
         label = Label(label_text)
         return ListItem(label, id=f"log-{summary['id']}")
+
+    @staticmethod
+    def _format_log_item_label(summary: ChatLogSummary) -> str:
+        name = summary["name"]
+        model = summary["model_id"] or "no model"
+        stamp = summary["updated_at"]
+        stamp = stamp.split(".")[0]
+        return f"{name} ({model}) [{stamp}]"
 
     def _highlight_log(self, log_id: int) -> None:
         if self._chat_log_list is None:
@@ -349,12 +365,7 @@ class ChatScreen(Screen[None]):
             child = self._chat_log_list.children[index]
         except IndexError:
             return None
-        if child.id and child.id.startswith("log-"):
-            try:
-                return int(child.id.split("-", 1)[1])
-            except ValueError:
-                return None
-        return None
+        return self._log_id_from_widget(child)
 
     async def _create_new_log(self) -> None:
         name = datetime.now().strftime("Session %Y-%m-%d %H:%M:%S")
@@ -369,6 +380,114 @@ class ChatScreen(Screen[None]):
             self._chat_log.clear()
         self._history.clear()
         self._log_sys_msg(f"Created log '{name}'.")
+        self.call_after_refresh(lambda: self._open_log_name_modal(new_id, "Name Chat Log", name))
+
+    def _prompt_rename_selected_log(self) -> None:
+        log_id = self._get_selected_log_id()
+        if log_id is None:
+            log_id = self._current_log_id
+        if log_id is None:
+            self._log_sys_msg("Select a chat log to rename.")
+            return
+        summary = self._log_storage.get_log(log_id)
+        if summary is None:
+            self._log_sys_msg("Chat log not found.")
+            return
+        self._open_log_name_modal(log_id, "Rename Chat Log", summary["name"])
+
+    def _open_log_name_modal(self, log_id: int, title: str, initial: str) -> None:
+        modal = ChatLogNameModal(title, initial)
+        self.app.push_screen(modal, lambda value: self._apply_log_name(log_id, value))
+
+    def _apply_log_name(self, log_id: int, result: Optional[str]) -> None:
+        if result is None:
+            return
+        name = result.strip()
+        if not name:
+            self._log_sys_msg("Log name cannot be blank.")
+            return
+        try:
+            self._log_storage.rename_log(log_id, name)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._log_sys_msg(f"Failed to rename chat log: {exc}")
+            return
+        self._log_sys_msg(f"Log renamed to '{name}'.")
+        self._current_log_id = log_id
+        asyncio.create_task(self._refresh_chat_log_list(select_id=log_id))
+
+    def _confirm_delete_selected_log(self) -> None:
+        log_id = self._get_selected_log_id()
+        if log_id is None:
+            log_id = self._current_log_id
+        if log_id is None:
+            self._log_sys_msg("Select a chat log to delete.")
+            return
+        summary = self._log_storage.get_log(log_id)
+        if summary is None:
+            self._log_sys_msg("Chat log not found.")
+            return
+        modal = ConfirmModal(
+            "Delete Chat Log",
+            f"Delete '{summary['name']}'? This cannot be undone.",
+            confirm_label="Delete",
+            confirm_variant="error",
+        )
+        self.app.push_screen(modal, lambda confirmed: self._finalize_delete_log(log_id, confirmed))
+
+    def _finalize_delete_log(self, log_id: int, confirmed: Optional[bool]) -> None:
+        if not confirmed:
+            return
+        try:
+            self._log_storage.delete_log(log_id)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._log_sys_msg(f"Failed to delete chat log: {exc}")
+            return
+        removed_current = self._current_log_id == log_id
+        if removed_current:
+            self._current_log_id = None
+            self._history.clear()
+            if self._chat_log is not None:
+                self._chat_log.clear()
+            self._clear_model(persist=False)
+        self._log_sys_msg("Chat log deleted.")
+        asyncio.create_task(self._post_delete_refresh(removed_current))
+
+    async def _post_delete_refresh(self, reload_current: bool) -> None:
+        summaries = self._log_storage.list_logs()
+        if not summaries:
+            default_name = datetime.now().strftime("Session %Y-%m-%d %H:%M:%S")
+            new_id = self._log_storage.create_log(default_name, self._model_id or "")
+            summaries = self._log_storage.list_logs()
+            self._current_log_id = new_id
+            reload_current = True
+        valid_ids = {summary["id"] for summary in summaries}
+        if self._current_log_id not in valid_ids:
+            self._current_log_id = summaries[0]["id"] if summaries else None
+            reload_current = True
+        await self._refresh_chat_log_list(select_id=self._current_log_id, summaries=summaries)
+        if reload_current and self._current_log_id is not None:
+            summary = self._log_storage.get_log(self._current_log_id)
+            if summary is not None:
+                self._model_id = summary["model_id"] or ""
+                if self._model_label is not None:
+                    self._model_label.update(self._model_id or "<select>")
+            messages = self._log_storage.get_messages(self._current_log_id, limit=MAX_RESTORED_MESSAGES)
+            if self._chat_log is not None:
+                self._chat_log.clear()
+            self._history.clear()
+            self._restore_messages_to_view(messages, persist=False)
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        log_id = self._log_id_from_widget(event.item)
+        if log_id is not None:
+            self._current_log_id = log_id
+
+    async def on_list_view_selected(self, event: ListView.Selected) -> None:
+        log_id = self._log_id_from_widget(event.item)
+        if log_id is None:
+            return
+        event.stop()
+        await self._handle_chat_log_load(log_id)
 
     async def _load_selected_chat_log(self) -> None:
         log_id = self._get_selected_log_id()
@@ -385,7 +504,7 @@ class ChatScreen(Screen[None]):
         messages = self._log_storage.get_messages(log_id, limit=MAX_RESTORED_MESSAGES)
         self._current_log_id = log_id
         self._highlight_log(log_id)
-        self._clear_model()
+        self._clear_model(persist=False)
         if self._chat_log is not None:
             self._chat_log.clear()
         self._history.clear()
@@ -423,6 +542,22 @@ class ChatScreen(Screen[None]):
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("Failed to update log model mapping: %s", exc)
 
+    @staticmethod
+    def _parse_log_item_id(item_id: Optional[str]) -> Optional[int]:
+        if not item_id:
+            return None
+        if not item_id.startswith("log-"):
+            return None
+        try:
+            return int(item_id.split("-", 1)[1])
+        except (IndexError, ValueError):
+            return None
+
+    def _log_id_from_widget(self, widget: Optional[ListItem]) -> Optional[int]:
+        if widget is None:
+            return None
+        return self._parse_log_item_id(getattr(widget, "id", None))
+
     def _schedule_generation(self) -> None:
         if self._generation_task is not None and not self._generation_task.done():
             return
@@ -444,17 +579,6 @@ class ChatScreen(Screen[None]):
             traceback.print_exception(type(exc), exc, exc.__traceback__)
             self._log_sys_msg(f"Error: {exc}")
 
-    @staticmethod
-    def _config_get(config: object, key: str, default=None):
-        if config is None:
-            return default
-        if isinstance(config, dict):
-            return config.get(key, default)
-        if hasattr(config, "__getitem__"):
-            value = config[key]  # type: ignore[index]
-            return default if value is None else value
-        return default
-
     async def _start_model_load(
         self,
         on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None
@@ -473,76 +597,46 @@ class ChatScreen(Screen[None]):
 
         self._loading_in_progress = True
         self._set_load_button_enabled(False)
-        self._log_sys_msg(f"Loading model '{self._model_id}'...")
-        self._log_sys_msg("Preparing model load…")
+        await self._log_sys_msg_async(f"Loading model '{self._model_id}'...")
+        await self._log_sys_msg_async("Preparing model load…")
 
         # loaded_model = self._load_model()
-        self._loading_task = asyncio.create_task(self._load_model_task())
-        self._loading_task.add_done_callback(self._on_load_task_finished)
-    
-    async def _load_model_task(self) -> None:
         try:
             model, model_config, tokenizer, model_path, elapsed = await self._load_model_async()
         except Exception as exc:
-            traceback.print_exception(type(exc), exc, exc.__traceback__)
-            await self._handle_load_failure(str(exc))
-            return
-        await self._handle_load_success(
-            model,
-            model_config,
-            tokenizer,
-            model_path,
-            elapsed
-        )
-        return
+            return await self._h_model_load_failure(f"Model load failed: {exc}")
+        else:
+            ready_msg = f"Model ready in {elapsed:.1f}s."
+            self._log_sys_msg(ready_msg)
+            self._loading_in_progress = False
+            self._set_load_button_enabled(True)
+            self._model = model
+            self._model_config = model_config
+            self._tokenizer = tokenizer
+            self._model_cache_path = model_path
+            if self._input is not None:
+                self._input.focus()
 
-    async def _handle_load_failure(self, message: str) -> None:
-        self._log_sys_msg(f"Error loading model: {message}")
+            # handle post-load callbacks
+            callbacks = list(self._post_load_callbacks)
+            self._post_load_callbacks.clear()
+            for callback in callbacks:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+    
+    async def _h_model_load_failure(self, message: str) -> None:
+        self._log_sys_msg(message)
         self._loading_in_progress = False
         self._set_load_button_enabled(True)
-        self._post_load_callbacks.clear()
-        self._pending_generation = False
         if self._input is not None:
             self._input.focus()
 
-    async def _handle_load_success(
-        self,
-        model: Model,
-        model_config: object,
-        tokenizer: AutoTokenizer,
-        model_path: Path,
-        elapsed: float
-    ) -> None:
-        ready_msg = f"Model ready in {elapsed:.1f}s."
-        self._log_sys_msg(ready_msg)
-        self._loading_in_progress = False
-        self._set_load_button_enabled(True)
-        self._model = model
-        self._model_config = model_config
-        self._tokenizer = tokenizer
-        self._model_cache_path = model_path
-        if self._input is not None:
-            self._input.focus()
-        callbacks = list(self._post_load_callbacks)
-        self._post_load_callbacks.clear()
-        for callback in callbacks:
-            result = callback()
-            if inspect.isawaitable(result):
-                await result
-
-    def _on_load_task_finished(self, task: asyncio.Future) -> None:
-        self._loading_task = None
-        try:
-            task.result()
-        except Exception:
-            # Exceptions are reported in the load task itself.
-            pass
-
-    def _log_sys_msg(self, message: str) -> None:
-        self._append_system(message, persist=False)
+    def _log_sys_msg(self, message: str, *, persist: bool = False) -> None:
+        self._append_system(message, persist=persist)
     
     async def _log_sys_msg_async(self, message: str) -> Awaitable[None]:
-        await asyncio.to_thread(self._append_system, message, False)
+        await asyncio.to_thread(self._append_system, message, persist=False)
 
     def _continue_generation(self) -> Optional[Awaitable[None]]:
         if not self._pending_generation:
@@ -581,13 +675,13 @@ class ChatScreen(Screen[None]):
             tokenizer_source = str(model_path)
             tokenizer_local = True
         elif self._offline:
-            return await self._handle_load_failure("Model not found in cache for offline mode.")
+            return await self._h_model_load_failure("Model not found in cache for offline mode.")
         
         if not local_model:
             logger.info(f"not local model downloading {self._model_id}")
             self._log_sys_msg(f"Downloading model from Hugging Face: {self._model_id}")
             if RepoCustom is None:
-                return await self._handle_load_failure("Custom repo handler not available. Please use huggingface_hub library.")
+                return await self._h_model_load_failure("Custom repo handler not available. Please use huggingface_hub library.")
             repo = RepoCustom(self._model_id)
             async def download_progress(message: str) -> None:
                 await self._log_sys_msg_async(f"[download] {message}")
@@ -597,7 +691,7 @@ class ChatScreen(Screen[None]):
             tokenizer_source = str(model_path)
             tokenizer_local = True
 
-        num_layers = int(self._config_get(model_config, "num_layers", 0))
+        num_layers = model_config.get("num_layers", 0)
         shard = Shard(
             self._model_id,
             start_layer=0,
@@ -611,7 +705,7 @@ class ChatScreen(Screen[None]):
         await self._log_sys_msg_async(f"Model instantiated. {model}")
         await self._log_sys_msg_async("Loading weights…")
         weight_device = os.getenv("TC_DEVICE", "CPU")
-        use_tied = bool(self._config_get(model_config, "tie_word_embeddings", False))
+        use_tied = model_config.get("tie_word_embeddings", False)
         # await asyncio.to_thread(
         #     load_safetensors,
         #     model,
@@ -673,9 +767,9 @@ class ChatScreen(Screen[None]):
             self._model.reset_kv_cache()
 
         max_new = max_new_tokens
-        temp = self._config_get(self._model_config, "temperature", 0.7) or 0.7
-        top_k = self._config_get(self._model_config, "top_k", 0) or 0
-        top_p = self._config_get(self._model_config, "top_p", 0.8) or 0.8
+        temp = self._model_config.get("temperature", 1.0)
+        top_k = self._model_config.get("top_k", 0)
+        top_p = self._model_config.get("top_p", 0.0)
 
         if self._generating_resp:
             self._log_sys_msg("Model is already generating a response.")
@@ -683,7 +777,7 @@ class ChatScreen(Screen[None]):
 
         self._generating_resp = True
         try:
-            await asyncio.to_thread(self._append_model, "Thinking...", False)
+            await asyncio.to_thread(self._append_model, "Thinking...", persist=False)
             result = streaming_generate(
                 self._model,
                 input_ids,
@@ -694,6 +788,22 @@ class ChatScreen(Screen[None]):
                 top_k=top_k,
                 top_p=top_p,
             )
+
+            # causes sql thread issue on mac
+            # result = await asyncio.to_thread(
+            #     streaming_generate,
+            #     self._model,
+            #     input_ids,
+            #     attention_mask,
+            #     self._tokenizer,
+            #     max_new_tokens=max_new,
+            #     temp=temp,
+            #     top_k=top_k,
+            #     top_p=top_p,
+            # )
+        except Exception as exc:
+            self._generating_resp = False
+            self._log_sys_msg(f"Error during generation: {exc}")
         finally:
             self._generating_resp = False
         out_tokens, elapsed = result
@@ -715,8 +825,8 @@ class ChatScreen(Screen[None]):
         if len(self._history) > 6:
             self._history = self._history[-6:]
 
-    def _clear_model(self) -> None:
-        self._log_sys_msg("Clearing loaded model.")
+    def _clear_model(self, *, persist: bool = True) -> None:
+        self._log_sys_msg("Clearing loaded model.", persist=persist)
         if hasattr(self, "_model") and self._model is not None and hasattr(self._model, "reset_kv_cache"):
             self._model.reset_kv_cache()
         self._model = None
@@ -731,4 +841,67 @@ class ChatScreen(Screen[None]):
         self._pending_generation = False
         if not self._loading_in_progress:
             self._set_load_button_enabled(True)
-        self._log_sys_msg("Model cleared. Select and load a model to continue.")
+        self._log_sys_msg("Model cleared. Select and load a model to continue.", persist=persist)
+
+
+class ChatLogNameModal(ModalScreen[Optional[str]]):
+    """Modal dialog to capture a chat log name."""
+
+    def __init__(self, title: str, initial: str = "") -> None:
+        super().__init__(id="chat-log-name-modal")
+        self._title = title
+        self._initial = initial
+        self._input: Optional[Input] = None
+
+    def compose(self) -> ComposeResult:
+        with Container(id="chat-log-name-modal-container"):
+            yield Label(self._title, id="chat-log-name-title")
+            self._input = Input(id="chat-log-name-field", placeholder="Enter log name…")
+            yield self._input
+            with Container(id="chat-log-name-buttons"):
+                yield Button("Cancel", id="chat-log-name-cancel")
+                yield Button("Save", id="chat-log-name-save", variant="primary")
+
+    def on_mount(self) -> None:
+        if self._input is not None:
+            self._input.value = self._initial
+            self.call_after_refresh(self._input.focus)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "chat-log-name-cancel":
+            self.dismiss(None)
+        elif event.button.id == "chat-log-name-save":
+            value = self._input.value.strip() if self._input else ""
+            self.dismiss(value or None)
+
+
+class ConfirmModal(ModalScreen[Optional[bool]]):
+    """Generic confirmation modal."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        confirm_label: str = "OK",
+        confirm_variant: str = "primary",
+    ) -> None:
+        super().__init__(id="chat-log-confirm-modal")
+        self._title = title
+        self._message = message
+        self._confirm_label = confirm_label
+        self._confirm_variant = confirm_variant
+
+    def compose(self) -> ComposeResult:
+        with Container(id="chat-log-confirm-modal-container"):
+            yield Label(self._title, id="chat-log-confirm-title")
+            yield Static(self._message, id="chat-log-confirm-message")
+            with Container(id="chat-log-confirm-buttons"):
+                yield Button("Cancel", id="chat-log-confirm-cancel")
+                yield Button(self._confirm_label, id="chat-log-confirm-accept", variant=self._confirm_variant)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "chat-log-confirm-cancel":
+            self.dismiss(False)
+        elif event.button.id == "chat-log-confirm-accept":
+            self.dismiss(True)
