@@ -563,6 +563,8 @@ class TrainScreen(Screen[None]):
         if self._settings_summary:
             self._settings_summary["model"].update(f"Model: {model}")
             self._settings_summary["data"].update(f"Dataset: {data}")
+        if self._node_steps:
+            self._node_steps[0].settings = dict(self._settings)
         self._sync_base_node_name()
 
     def _set_buttons(self, *, running: bool) -> None:
@@ -644,3 +646,68 @@ class TrainScreen(Screen[None]):
 
         # GPU metrics placeholder (extend in future when integrations are available)
         self._resource_labels["gpu"].update("GPU: N/A")
+
+
+class TrainSettingsScreen(ModalScreen[Dict[str, object]]):
+    """Modal for editing training invocation settings."""
+
+    CSS_PATH = Path(__file__).with_name("train_menu.tcss")
+
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    def __init__(self, values: Dict[str, object]) -> None:
+        super().__init__(id="train-settings")
+        self._initial = dict(values)
+        self._inputs: Dict[str, Input | Checkbox] = {}
+
+    def compose(self) -> ComposeResult:
+        columns = 3 if len(SETTINGS_FIELDS) >= 9 else 2
+        per_column = math.ceil(len(SETTINGS_FIELDS) / columns)
+        with Container(id="settings-modal-container"):
+            yield Static("Training Settings", id="settings-modal-title")
+            with VerticalScroll(id="settings-scroll"):
+                with Container(id="settings-columns"):
+                    for chunk in chunked(SETTINGS_FIELDS, per_column):
+                        with Vertical(classes="settings-column"):
+                            for field in chunk:
+                                name = str(field["name"])
+                                label = str(field["label"])
+                                field_type = field.get("type", "text")
+                                yield Label(label, classes="settings-field-label")
+                                if field_type == "checkbox":
+                                    widget = Checkbox(id=f"settings-{name}")
+                                else:
+                                    placeholder = str(field.get("placeholder", ""))
+                                    widget = Input(id=f"settings-{name}", placeholder=placeholder)
+                                widget.add_class("settings-field-input")
+                                self._inputs[name] = widget
+                                yield widget
+            with Container(id="settings-modal-buttons"):
+                yield Button("Cancel", id="settings-cancel")
+                yield Button("Apply", id="settings-apply", variant="primary")
+
+    def on_mount(self) -> None:
+        for name, widget in self._inputs.items():
+            value = self._initial.get(name)
+            if isinstance(widget, Checkbox):
+                widget.value = bool(value)
+            elif value is not None:
+                widget.value = str(value)
+        first = self._inputs.get("model-id")
+        if isinstance(first, Input):
+            self.call_after_refresh(first.focus)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "settings-cancel":
+            self.dismiss(None)
+        elif event.button.id == "settings-apply":
+            self.dismiss(self._gather_values())
+
+    def _gather_values(self) -> Dict[str, object]:
+        result: Dict[str, object] = {}
+        for name, widget in self._inputs.items():
+            if isinstance(widget, Checkbox):
+                result[name] = widget.value
+            else:
+                result[name] = widget.value.strip()
+        return result

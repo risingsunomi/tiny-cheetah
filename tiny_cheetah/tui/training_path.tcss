@@ -1,5 +1,5 @@
 Screen {
-    background: #08131f;
+    background: $surface;
     color: $text;
 }
 
@@ -14,25 +14,42 @@ Screen {
     margin-bottom: 1;
 }
 
-#path-graph {
+#path-body {
     layout: horizontal;
-    height: 6;
-    min-height: 6;
+    height: 1fr;
+}
+
+#path-graph-scroll {
+    width: 1fr;
+    height: 1fr;
+    margin-right: 1;
+}
+
+#path-graph {
+    layout: vertical;
     border: round $primary;
     padding: 1;
     background: #0b1e33;
-    margin-bottom: 1;
-    overflow-x: auto;
-    align: center middle;
+    width: 1fr;
+    overflow-y: auto;
+}
+
+#path-sidebar {
+    width: 32%;
+    min-width: 28%;
+    layout: vertical;
 }
 
 .graph-node {
-    min-width: 16;
+    width: 1fr;
     padding: 1;
+    min-height: 3;
     text-align: center;
     border: round #1e3a5c;
-    margin-right: 1;
     background: #112845;
+    text-wrap: wrap;
+    margin-bottom: 1;
+    color: $text;
 }
 
 .graph-node.selected {
@@ -57,21 +74,21 @@ Screen {
 }
 
 .graph-connector {
-    margin-right: 1;
+    height: auto;
     color: #3bd6ee;
-    align: center middle;
+    text-align: center;
+    margin-bottom: 1;
 }
 
 .graph-empty {
     color: $text-muted;
 }
 
-#path-list {
-    height: 1fr;
+#path-sidebar #path-list {
+    height: 40%;
     border: round $primary;
     background: $surface-darken-1;
-    padding: 1;
-    margin-bottom: 1;
+    overflow-y: auto;
 }
 
 #path-feedback {
@@ -81,25 +98,18 @@ Screen {
 }
 
 #path-actions {
-    layout: horizontal;
-    margin-bottom: 1;
+    height: 60%;
+    layout: vertical;
+    align: center middle;
 }
 
 #path-actions Button {
     margin-right: 1;
+    margin-bottom: 1;
 }
 
 #path-actions Button:last-child {
     margin-right: 0;
-}
-
-#path-footer {
-    layout: horizontal;
-    align: right middle;
-}
-
-#path-footer Button#path-save {
-    margin-left: 1;
 }
 
 ModalScreen#node-step-modal,
@@ -134,6 +144,7 @@ ModalScreen#path-confirm-modal {
     align: right middle;
     margin-top: 1;
 }
+
 
 #node-step-buttons Button#node-step-confirm,
 #path-confirm-buttons Button#path-confirm-accept {

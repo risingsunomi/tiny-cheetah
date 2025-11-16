@@ -30,21 +30,12 @@ Screen {
 
 #chat-log-actions,
 #chat-log-secondary-actions {
-    layout: horizontal;
+    layout: vertical;
+    align: center middle;
 }
 
-#chat-log-actions Button,
-#chat-log-secondary-actions Button {
-    margin-right: 1;
-}
-
-#chat-log-actions Button#load-chat-log,
-#chat-log-secondary-actions Button#delete-chat-log {
-    margin-right: 0;
-}
-
-#chat-log-secondary-actions {
-    margin-top: 1;
+#chat-log-actions Button {
+    margin-bottom: 1;
 }
 
 #chat-log-list {

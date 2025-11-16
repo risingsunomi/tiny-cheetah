@@ -73,7 +73,7 @@ class RepoCustom:
 
         self._load_configs()
         await emit("Download complete.")
-        return self.base_dir, self.model_config, messages
+        return self.base_dir, self.model_config.config, messages
 
     def _load_configs(self) -> None:
         config_file = self.base_dir / "config.json"

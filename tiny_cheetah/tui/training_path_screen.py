@@ -5,10 +5,12 @@ import copy
 from pathlib import Path
 from typing import List, Optional
 
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, VerticalScroll
 from textual.screen import Screen, ModalScreen
+from textual.widget import Widget
 from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static
 
 from tiny_cheetah.tui.training_path_types import TrainingNode, NODE_STATUS_STYLES, NODE_STATUS_SYMBOLS
@@ -31,35 +33,42 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         self._graph_canvas: Optional[Container] = None
         self._feedback: Optional[Label] = None
         self._selected_index = 0
+        self._drag_index: Optional[int] = None
+        self._rename_button: Optional[Button] = None
+        self._delete_button: Optional[Button] = None
 
     def compose(self) -> ComposeResult:
         items = [self._build_list_item(index, node) for index, node in enumerate(self._path_nodes)]
         yield Header(show_clock=True)
         with Container(id="path-root"):
             yield Label("Training Path Editor", id="path-title")
-            graph = Container(id="path-graph")
-            self._graph_canvas = graph
-            yield graph
-            list_view = ListView(*items, id="path-list")
-            self._path_list = list_view
-            yield list_view
-            feedback = Label("", id="path-feedback")
-            self._feedback = feedback
-            yield feedback
-            with Container(id="path-actions"):
-                yield Button("Add Step", id="path-add", variant="primary")
-                yield Button("Rename Step", id="path-rename")
-                yield Button("Delete Step", id="path-delete", variant="error")
-                yield Button("Move Up", id="path-move-up")
-                yield Button("Move Down", id="path-move-down")
-                yield Button("Reset", id="path-reset", variant="warning")
-            with Container(id="path-footer"):
-                yield Button("Cancel", id="path-cancel")
-                yield Button("Save & Return", id="path-save", variant="success")
+            with Container(id="path-body"):
+                with VerticalScroll(id="path-graph-scroll"):
+                    graph = Container(id="path-graph")
+                    self._graph_canvas = graph
+                    yield graph
+                with Container(id="path-sidebar"):
+                    list_view = ListView(*items, id="path-list")
+                    self._path_list = list_view
+                    yield list_view
+                    feedback = Label("", id="path-feedback")
+                    self._feedback = feedback
+                    yield feedback
+                    with Container(id="path-actions"):
+                        yield Button("Add Step", id="path-add", variant="primary")
+                        rename_btn = Button("Rename Step", id="path-rename")
+                        self._rename_button = rename_btn
+                        yield rename_btn
+                        delete_btn = Button("Delete Step", id="path-delete", variant="error")
+                        self._delete_button = delete_btn
+                        yield delete_btn
+                        yield Button("Reset", id="path-reset", variant="warning")
+                        yield Button("Cancel", id="path-cancel")
+                        yield Button("Save & Return", id="path-save", variant="success")
         yield Footer()
 
     def action_cancel(self) -> None:
-        self._close(None)
+        self.dismiss(None)
 
     def on_mount(self) -> None:
         self._refresh_views()
@@ -67,12 +76,10 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         handlers = {
             "path-add": self._handle_add,
-            "path-rename": self._handle_rename,
-            "path-delete": self._handle_delete,
-            "path-move-up": lambda: self._handle_move(-1),
-            "path-move-down": lambda: self._handle_move(1),
+            "path-rename": lambda: self._handle_rename(self._selected_index),
+            "path-delete": lambda: self._handle_delete(self._selected_index),
             "path-reset": self._handle_reset,
-            "path-cancel": lambda: self._close(None),
+            "path-cancel": lambda: self.dismiss(None),
             "path-save": self._handle_save,
         }
         handler = handlers.get(event.button.id)
@@ -84,13 +91,29 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         if index is not None:
             self._selected_index = index
             self._refresh_graph()
+            self._update_action_buttons()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = self._index_from_item(event.item)
         if index is None:
             return
         self._selected_index = index
-        self._handle_rename()
+        self._refresh_graph()
+        self._update_action_buttons()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 1:
+            node_index = self._graph_node_index_from_control(event.control)
+            if node_index is not None:
+                self._drag_index = node_index
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._drag_index is None:
+            return
+        target_index = self._graph_node_index_from_control(event.control)
+        if target_index is not None and target_index != self._drag_index:
+            self._move_node(self._drag_index, target_index)
+        self._drag_index = None
 
     # ---- Event handlers -------------------------------------------------
 
@@ -98,8 +121,7 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         modal = NodeStepModal()
         self.app.push_screen(modal, self._on_add_result)
 
-    def _handle_rename(self) -> None:
-        index = self._selected_index
+    def _handle_rename(self, index: int) -> None:
         if not self._path_nodes:
             self._set_feedback("No steps to rename.")
             return
@@ -110,12 +132,8 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         modal = NodeStepModal(title="Rename Training Step", initial=current.name, confirm_label="Save")
         self.app.push_screen(modal, lambda result: self._on_rename_result(index, result))
 
-    def _handle_delete(self) -> None:
-        if len(self._path_nodes) <= 1:
-            self._set_feedback("Cannot delete the base step.")
-            return
-        index = self._selected_index
-        if index <= 0:
+    def _handle_delete(self, index: int) -> None:
+        if len(self._path_nodes) <= 1 or index <= 0:
             self._set_feedback("Cannot delete the base step.")
             return
         node = self._path_nodes[index]
@@ -126,19 +144,6 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
             confirm_variant="error",
         )
         self.app.push_screen(modal, lambda confirmed: self._on_delete_result(index, confirmed))
-
-    def _handle_move(self, offset: int) -> None:
-        if not self._path_nodes:
-            return
-        index = self._selected_index
-        target = index + offset
-        if index <= 0 or target <= 0 or target >= len(self._path_nodes):
-            self._set_feedback("Cannot move step beyond bounds.")
-            return
-        self._path_nodes[index], self._path_nodes[target] = self._path_nodes[target], self._path_nodes[index]
-        self._selected_index = target
-        self._refresh_views()
-        self._set_feedback(f"Moved step to position {target + 1}.")
 
     def _handle_reset(self) -> None:
         modal = PathConfirmModal(
@@ -153,7 +158,7 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         for node in self._path_nodes:
             node.status = "pending"
         self._ensure_base_step()
-        self._close(copy.deepcopy(self._path_nodes))
+        self.dismiss(copy.deepcopy(self._path_nodes))
 
     # ---- Results from modals -------------------------------------------
 
@@ -164,7 +169,8 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         if not name:
             self._set_feedback("Step name cannot be blank.")
             return
-        self._path_nodes.append(TrainingNode(name))
+        base_settings = copy.deepcopy(self._path_nodes[0].settings)
+        self._path_nodes.append(TrainingNode(name, settings=base_settings))
         self._selected_index = len(self._path_nodes) - 1
         self._refresh_views()
         self._set_feedback(f"Added step '{name}'.")
@@ -205,6 +211,7 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
     async def _async_refresh_views(self) -> None:
         await self._refresh_list()
         await self._refresh_graph()
+        self._update_action_buttons()
 
     async def _refresh_list(self) -> None:
         if self._path_list is None:
@@ -222,7 +229,7 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
     async def _refresh_graph(self) -> None:
         if self._graph_canvas is None:
             return
-        await self._graph_canvas.clear()
+        await self._graph_canvas.remove_children()
         if not self._path_nodes:
             await self._graph_canvas.mount(Static("No steps defined", classes="graph-empty"))
             return
@@ -231,10 +238,11 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
                 self._format_node_label(node),
                 classes=self._graph_classes(index, node),
                 markup=True,
+                id=f"graph-node-{index}",
             )
             await self._graph_canvas.mount(node_box)
             if index < len(self._path_nodes) - 1:
-                connector = Static("──────▶", classes="graph-connector")
+                connector = Static("│\n│\n▼", classes="graph-connector", markup=False)
                 await self._graph_canvas.mount(connector)
 
     # ---- Helpers --------------------------------------------------------
@@ -285,9 +293,36 @@ class TrainingPathScreen(Screen[Optional[List[TrainingNode]]]):
         if self._feedback is not None:
             self._feedback.update(message)
 
-    def _close(self, result: Optional[List[TrainingNode]]) -> None:
-        self.app.pop_screen(result)
+    def _graph_node_index_from_control(self, control: Optional[Widget]) -> Optional[int]:
+        target = control
+        while target is not None:
+            if target.id and target.id.startswith("graph-node-"):
+                try:
+                    return int(target.id.split("-", 2)[2])
+                except (IndexError, ValueError):
+                    return None
+            target = target.parent
+        return None
 
+    def _move_node(self, source: int, target: int) -> None:
+        if source == target or target < 0 or target >= len(self._path_nodes):
+            return
+        if source == 0 or target == 0:
+            self._set_feedback("Base step remains at the top.")
+            return
+        node = self._path_nodes.pop(source)
+        target = max(0, min(target, len(self._path_nodes)))
+        self._path_nodes.insert(target, node)
+        self._selected_index = target
+        self._refresh_views()
+        self._set_feedback(f"Moved step to position {target + 1}.")
+    def _update_action_buttons(self) -> None:
+        allow_rename = self._selected_index > 0
+        allow_delete = self._selected_index > 0 and len(self._path_nodes) > 1
+        if self._rename_button is not None:
+            self._rename_button.disabled = not allow_rename
+        if self._delete_button is not None:
+            self._delete_button.disabled = not allow_delete
 
 class NodeStepModal(ModalScreen[Optional[str]]):
     """Modal dialog for capturing a training step name."""

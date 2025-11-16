@@ -92,7 +92,6 @@ class ChatScreen(Screen[None]):
                     with Container(id="chat-log-actions"):
                         yield Button("New Log", id="new-chat-log", variant="primary")
                         yield Button("Load Log", id="load-chat-log")
-                    with Container(id="chat-log-secondary-actions"):
                         yield Button("Rename Log", id="rename-chat-log")
                         yield Button("Delete Log", id="delete-chat-log", variant="error")
                 yield RichLog(id="chat-log", markup=True, auto_scroll=True, wrap=True)
@@ -604,7 +603,7 @@ class ChatScreen(Screen[None]):
         try:
             model, model_config, tokenizer, model_path, elapsed = await self._load_model_async()
         except Exception as exc:
-            return await self._h_model_load_failure(f"Model load failed: {exc}")
+            return await self._h_model_load_failure(f"Model load failed: {exc}\n traceback: {traceback.format_exc()}")
         else:
             ready_msg = f"Model ready in {elapsed:.1f}s."
             self._log_sys_msg(ready_msg)
@@ -666,7 +665,6 @@ class ChatScreen(Screen[None]):
             resolved_path = cache_path
 
         local_model = False
-        print(f"resolved_path: {resolved_path}")
         if resolved_path is not None and any(resolved_path.glob("*.*")):
             self._log_sys_msg_async(f"Loading local model from {resolved_path}")
             local_model = True
@@ -691,7 +689,7 @@ class ChatScreen(Screen[None]):
             tokenizer_source = str(model_path)
             tokenizer_local = True
 
-        num_layers = model_config.get("num_layers", 0)
+        num_layers = model_config["num_layers"]
         shard = Shard(
             self._model_id,
             start_layer=0,
@@ -705,7 +703,7 @@ class ChatScreen(Screen[None]):
         await self._log_sys_msg_async(f"Model instantiated. {model}")
         await self._log_sys_msg_async("Loading weights…")
         weight_device = os.getenv("TC_DEVICE", "CPU")
-        use_tied = model_config.get("tie_word_embeddings", False)
+        use_tied = model_config["tie_word_embeddings"]
         # await asyncio.to_thread(
         #     load_safetensors,
         #     model,
@@ -745,7 +743,7 @@ class ChatScreen(Screen[None]):
         gen_config = directory / "generation_config.json"
         if gen_config.exists():
             config.load_generation_config(gen_config)
-        return directory, config
+        return directory, config.config
 
     async def _generate_response(self, max_new_tokens: int = 4096) -> None:
         if self._model is None or self._tokenizer is None:
@@ -767,9 +765,9 @@ class ChatScreen(Screen[None]):
             self._model.reset_kv_cache()
 
         max_new = max_new_tokens
-        temp = self._model_config.get("temperature", 1.0)
-        top_k = self._model_config.get("top_k", 0)
-        top_p = self._model_config.get("top_p", 0.0)
+        temp = self._model_config["temperature"]
+        top_k = self._model_config["top_k"]
+        top_p = self._model_config["top_p"]
 
         if self._generating_resp:
             self._log_sys_msg("Model is already generating a response.")
@@ -804,6 +802,7 @@ class ChatScreen(Screen[None]):
         except Exception as exc:
             self._generating_resp = False
             self._log_sys_msg(f"Error during generation: {exc}")
+            self._log_sys_msg(f"Traceback: {traceback.format_exc()}")
         finally:
             self._generating_resp = False
         out_tokens, elapsed = result

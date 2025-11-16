@@ -12,7 +12,7 @@ from tinygrad import dtypes
 
 class ModelConfig:
     def __init__(self):
-        self.model_config = {}
+        self.config = {}
         self.qk_norm_models = ["qwen3", "qwen2"] # TODO: replace with config.json
 
     def load(self, config_file: Path):
@@ -35,7 +35,7 @@ class ModelConfig:
             "bool": dtypes.bool,
         }
 
-        self.model_config = {
+        self.config = {
             "architectures": base_config.get("architectures", []),
             "embed_dim": base_config["hidden_size"],
             "num_heads": base_config["num_attention_heads"],
@@ -59,51 +59,66 @@ class ModelConfig:
                 dtypes.bfloat16
             ),
             "tie_word_embeddings": base_config.get("tie_word_embeddings", False),
-            "model_type": base_config.get("model_type", "")
+            "model_type": base_config.get("model_type", ""),
+            "temperature": 0.0,
+            "top_k": 0,
+            "top_p": 0.0,
+            "eos_token_id": None,
+            "pad_token_id": None,
+            "bos_token_id": None,
         }
 
-        self.model_config["rope_scaling_factor"] = None
-        self.model_config["rope_low_freq_factor"] = 0.0
-        self.model_config["rope_high_freq_factor"] = 0.0
-        self.model_config["rope_original_max_pos_embeddings"] = 0
+        self.config["rope_scaling_factor"] = None
+        self.config["rope_low_freq_factor"] = 0.0
+        self.config["rope_high_freq_factor"] = 0.0
+        self.config["rope_original_max_pos_embeddings"] = 0
 
-        rope_scaling = self.model_config.get("rope_scaling")
+        rope_scaling = self.config.get("rope_scaling")
         if rope_scaling is not None:
-            self.model_config["rope_scaling_factor"] = rope_scaling.get("factor", rope_scaling.get("rope_factor", 0))
-            self.model_config["rope_low_freq_factor"] = rope_scaling.get("low_freq_factor", rope_scaling.get("beta_fast", 0))
-            self.model_config["rope_high_freq_factor"] = rope_scaling.get("high_freq_factor", rope_scaling.get("beta_slow", 0))
-            self.model_config["rope_original_max_pos_embeddings"] = rope_scaling.get("original_max_position_embeddings", rope_scaling.get("original_max_pos", 0))
-            self.model_config["rope_type"] = rope_scaling.get("rope_type", "llama3")
+            self.config["rope_scaling_factor"] = rope_scaling.get("factor", rope_scaling.get("rope_factor", 0))
+            self.config["rope_low_freq_factor"] = rope_scaling.get("low_freq_factor", rope_scaling.get("beta_fast", 0))
+            self.config["rope_high_freq_factor"] = rope_scaling.get("high_freq_factor", rope_scaling.get("beta_slow", 0))
+            self.config["rope_original_max_pos_embeddings"] = rope_scaling.get("original_max_position_embeddings", rope_scaling.get("original_max_pos", 0))
+            self.config["rope_type"] = rope_scaling.get("rope_type", "llama3")
 
         # attention qk norm flag (default False if missing)
         attn_qk_norm = base_config.get("attn_qk_norm")
         if isinstance(attn_qk_norm, bool):
-            self.model_config["qk_norm"] = attn_qk_norm
+            self.config["qk_norm"] = attn_qk_norm
         elif isinstance(attn_qk_norm, str):
             # treat string variants like "rmsnorm" as enabled
-            self.model_config["qk_norm"] = len(attn_qk_norm) > 0
-        elif self.model_config.get("model_type",  "") in self.qk_norm_models:
-            self.model_config["qk_norm"] = True
+            self.config["qk_norm"] = len(attn_qk_norm) > 0
+        elif self.config.get("model_type",  "") in self.qk_norm_models:
+            self.config["qk_norm"] = True
         else:
-            self.model_config["qk_norm"] = False
+            self.config["qk_norm"] = False
 
         custom_seq = os.getenv("TC_MAX_SEQ_LEN")
         if custom_seq is not None:
-            self.model_config["max_seq_len"] = custom_seq
+            self.config["max_seq_len"] = custom_seq
 
     def load_generation_config(self, gen_config_file: Path):
         with open(gen_config_file, "r") as f:
             gen_config = json.loads(f.read())
         
-        self.model_config["temperature"] = gen_config.get("temperature") if os.getenv("TC_TEMP") is None else float(os.getenv("TC_TEMP"))
-        self.model_config["top_k"] = gen_config.get("top_k") if os.getenv("TC_TOP_K") is None else int(os.getenv("TC_TOP_K"))
-        self.model_config["top_p"] = gen_config.get("top_p") if os.getenv("TC_TOP_P") is None else float(os.getenv("TC_TOP_P"))
-        self.model_config["eos_token_id"] = gen_config.get("eos_token_id")
-        self.model_config["pad_token_id"] = gen_config.get("pad_token_id")
-        self.model_config["bos_token_id"] = gen_config.get("bos_token_id")
+        if os.getenv("TC_TEMP") is not None:
+            self.config["temperature"] = float(os.getenv("TC_TEMP"))
+        else:
+            self.config["temperature"] = gen_config.get("temperature", 0.0)
+            
+        if os.getenv("TC_TOP_K") is not None:
+            self.config["top_k"] = int(os.getenv("TC_TOP_K"))
+        else:
+            self.config["top_k"] = gen_config.get("top_k", 0)
 
-    def __getitem__(self, key):
-        return self.model_config.get(key, None)
+        if os.getenv("TC_TOP_P") is not None:
+            self.config["top_p"] = float(os.getenv("TC_TOP_P"))
+        else:
+            self.config["top_p"] = gen_config.get("top_p", 0.0)
+
+        self.config["eos_token_id"] = gen_config.get("eos_token_id")
+        self.config["pad_token_id"] = gen_config.get("pad_token_id")
+        self.config["bos_token_id"] = gen_config.get("bos_token_id")
     
     def __str__(self):
-        return str(self.model_config)
+        return str(self.config)
