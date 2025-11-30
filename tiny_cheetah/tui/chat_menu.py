@@ -23,6 +23,8 @@ from tiny_cheetah.models.llm.shard import Shard
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.repos import RepoCustom
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
+from tiny_cheetah.orchestration import get_peer_manager
+from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -79,9 +81,14 @@ class ChatScreen(Screen[None]):
         self._chat_log_list: Optional[ListView] = None
         self._log_storage = ChatLogStorage()
         self._current_log_id: Optional[int] = None
+        self._peer_manager = get_peer_manager()
+        self._peer_label: Optional[Label] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        peer_label = Label("Nodes: 0", id="peer-counter")
+        self._peer_label = peer_label
+        yield peer_label
         with Container(id="chat-root"):
             with Container(id="chat-body"):
                 with Container(id="chat-history"):
@@ -116,6 +123,7 @@ class ChatScreen(Screen[None]):
                     with Static(id="actions-panel"):
                         yield Label("Actions", classes="panel-title")
                         yield Button("Clear Model", id="clear-model", variant="error")
+                        yield Button("Network Nodes", id="open-orchestration")
                         yield Button("Back to Menu", id="chat-back")
             yield Input(placeholder="Type a prompt and press Enter…", id="chat-input")
         yield Footer()
@@ -127,6 +135,7 @@ class ChatScreen(Screen[None]):
             self.call_after_refresh(self._input.focus)
         if self._model_label is not None:
             self._model_label.update(self._model_id or "<select>")
+        self.set_interval(2.0, self._update_peer_banner)
         await self._initialize_chat_logs()
 
     def action_open_model_picker(self) -> None:
@@ -152,6 +161,8 @@ class ChatScreen(Screen[None]):
             await self._create_new_log()
         elif event.button.id == "load-chat-log":
             await self._load_selected_chat_log()
+        elif event.button.id == "open-orchestration":
+            self.app.push_screen(OrchestrationScreen())
         elif event.button.id == "rename-chat-log":
             self._prompt_rename_selected_log()
         elif event.button.id == "delete-chat-log":
@@ -540,6 +551,11 @@ class ChatScreen(Screen[None]):
             await self._refresh_chat_log_list(select_id=self._current_log_id)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("Failed to update log model mapping: %s", exc)
+
+    def _update_peer_banner(self) -> None:
+        if self._peer_label is not None:
+            count = self._peer_manager.peer_count()
+            self._peer_label.update(f"Nodes: {count}")
 
     @staticmethod
     def _parse_log_item_id(item_id: Optional[str]) -> Optional[int]:

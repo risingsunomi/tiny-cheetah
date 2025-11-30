@@ -1,0 +1,61 @@
+Screen {
+    background: $surface;
+}
+
+#hosting-root {
+    layout: vertical;
+    padding: 2;
+}
+
+#hosting-root > * {
+    margin-bottom: 1;
+}
+
+#hosting-root > *:last-child {
+    margin-bottom: 0;
+}
+
+#hosting-offer {
+    border: round $primary;
+    padding: 1;
+}
+
+#hosting-offer > * {
+    margin-bottom: 1;
+}
+
+#hosting-offer > *:last-child {
+    margin-bottom: 0;
+}
+
+#hosting-gpus {
+    border: round $primary;
+    padding: 1;
+}
+
+#hosting-buttons {
+    layout: horizontal;
+}
+
+#hosting-buttons Button {
+    margin-right: 1;
+}
+
+#hosting-buttons Button:last-child {
+    margin-right: 0;
+}
+
+#hosting-log {
+    height: 8;
+    border: round $secondary;
+}
+
+#hosting-log-box {
+    border: round $primary;
+    padding: 1;
+}
+
+#hosting-log-title {
+    margin-bottom: 1;
+    text-style: bold;
+}

@@ -151,3 +151,8 @@ ModalScreen#chat-log-confirm-modal {
 #chat-log-confirm-buttons Button#chat-log-confirm-accept {
     margin-left: 1;
 }
+#peer-counter {
+    text-align: right;
+    padding: 0 2;
+    color: $text-muted;
+}

@@ -17,6 +17,8 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
+from tiny_cheetah.orchestration import get_peer_manager
+from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 from rich.markup import escape
 
 from tiny_cheetah.tui.training_path_types import TrainingNode, NODE_STATUS_STYLES, NODE_STATUS_SYMBOLS
@@ -178,10 +180,15 @@ class TrainScreen(Screen[None]):
         self._path_summary_label: Optional[Label] = None
         self._auto_training_runs = 1
         self._stopped_by_user = False
+        self._peer_manager = get_peer_manager()
+        self._peer_label: Optional[Label] = None
         self._sync_base_node_name()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        peer_label = Label("Nodes: 0", id="peer-counter")
+        self._peer_label = peer_label
+        yield peer_label
         with Container(id="train-root"):
             with Container(id="train-left"):
                 yield Static("Training Console", id="model-banner")
@@ -189,6 +196,7 @@ class TrainScreen(Screen[None]):
                 with Container(id="control-row"):
                     yield Button("Start", id="start-training", variant="primary")
                     yield Button("Stop", id="stop-training", disabled=True)
+                    yield Button("Network", id="open-network")
                     yield Button("Back", id="back-to-menu")
             with Container(id="train-right"):
                 with VerticalScroll(id="train-right-scroll"):
@@ -215,6 +223,7 @@ class TrainScreen(Screen[None]):
                             yield Label("CPU: --", id="resource-cpu")
                             yield Label("Memory: --", id="resource-ram")
                             yield Label("GPU: --", id="resource-gpu")
+                            yield Label("Nodes: --", id="resource-peers")
 
     def apply_default_settings(self, defaults: Dict[str, object]) -> None:
         for key, value in defaults.items():
@@ -247,6 +256,7 @@ class TrainScreen(Screen[None]):
             "cpu": self.query_one("#resource-cpu", Label),
             "ram": self.query_one("#resource-ram", Label),
             "gpu": self.query_one("#resource-gpu", Label),
+            "peers": self.query_one("#resource-peers", Label),
         }
         if self._active_args_label is None:
             self._active_args_label = self.query_one("#active-args", Label)
@@ -257,6 +267,7 @@ class TrainScreen(Screen[None]):
         if self._path_summary_label is None:
             self._path_summary_label = self.query_one("#training-path-summary", Label)
         self._update_settings_summary()
+        self.set_interval(2.0, self._update_peer_banner)
 
         self._poll_timer = self.set_interval(0.25, self._poll_training_output, pause=True)
         self._resource_timer = self.set_interval(1.0, self._update_resource_usage)
@@ -291,6 +302,8 @@ class TrainScreen(Screen[None]):
             self._open_settings()
         elif button_id == "open-training-path":
             self._open_training_path()
+        elif button_id == "open-network":
+            self.app.push_screen(OrchestrationScreen())
 
     def _open_settings(self) -> None:
         screen = TrainSettingsScreen(dict(self._settings))
@@ -646,6 +659,13 @@ class TrainScreen(Screen[None]):
 
         # GPU metrics placeholder (extend in future when integrations are available)
         self._resource_labels["gpu"].update("GPU: N/A")
+        devices = ", ".join(self._peer_manager.aggregate_devices()) or "local only"
+        self._resource_labels["peers"].update(f"Nodes: {self._peer_manager.peer_count()} ({devices})")
+
+    def _update_peer_banner(self) -> None:
+        if self._peer_label is not None:
+            count = self._peer_manager.peer_count()
+            self._peer_label.update(f"Nodes: {count}")
 
 
 class TrainSettingsScreen(ModalScreen[Dict[str, object]]):

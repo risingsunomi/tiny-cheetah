@@ -2,6 +2,12 @@ Screen {
     background: $surface;
 }
 
+#peer-counter {
+    text-align: right;
+    padding: 0 2;
+    color: $text-muted;
+}
+
 #train-root {
     layout: horizontal;
     height: 1fr;

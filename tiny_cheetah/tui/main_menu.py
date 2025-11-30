@@ -7,6 +7,7 @@ from textual.containers import Container, Center
 
 from .chat_menu import ChatScreen
 from .train_menu import TrainScreen
+from .orchestration_screen import OrchestrationScreen
 
 
 class MainMenu(App):
@@ -37,6 +38,7 @@ class MainMenu(App):
         with Container(id="menu-btns"):
             yield Button("Chat", id="chat-btn")
             yield Button("Train", id="train-btn")
+            yield Button("Network", id="network-btn")
             yield Button("Quit", id="quit-btn")
 
     def on_mount(self) -> None:
@@ -57,6 +59,8 @@ class MainMenu(App):
             if defaults:
                 screen.apply_default_settings(defaults)
             self.push_screen(screen)
+        elif button_id == "network-btn":
+            self.push_screen(OrchestrationScreen())
         elif button_id == "quit-btn":
             self.exit()
 
