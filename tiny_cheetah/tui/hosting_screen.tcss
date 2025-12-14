@@ -1,7 +1,3 @@
-Screen {
-    background: $surface;
-}
-
 #hosting-root {
     layout: vertical;
     padding: 2;
@@ -15,9 +11,16 @@ Screen {
     margin-bottom: 0;
 }
 
+#hosting-metadata {
+    layout: horizontal;
+    align: center middle;
+    height: 50%;
+}
+
 #hosting-offer {
     border: round $primary;
     padding: 1;
+    overflow-y: auto;
 }
 
 #hosting-offer > * {

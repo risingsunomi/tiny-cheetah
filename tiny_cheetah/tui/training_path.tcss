@@ -1,7 +1,4 @@
-Screen {
-    background: $surface;
-    color: $text;
-}
+
 
 #path-root {
     layout: vertical;

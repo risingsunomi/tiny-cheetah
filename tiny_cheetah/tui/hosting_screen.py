@@ -21,7 +21,7 @@ class HostingScreen(Screen[None]):
         self._host_input = Input(value="0.0.0.0", placeholder="bind host", id="host-address")
         self._port_input = Input(value="8765", placeholder="port", id="host-port")
         self._password_input = Input(value="", placeholder="access password (optional)", password=True, id="host-pass")
-        profile = self._manager.get_billing_profile()
+        profile = self._manager.server_profile
         host_info = self._manager.get_host_info()
         default_gpu = ""
         if host_info.get("gpus"):
@@ -29,41 +29,36 @@ class HostingScreen(Screen[None]):
         self._desc_input = Input(value=profile.description, placeholder="Server description", id="host-desc")
         self._flops_input = Input(value=f"{profile.flops_gflops}", placeholder="GFLOPS", id="host-flops")
         self._gpu_input = Input(value=profile.gpu_description or default_gpu, placeholder="GPU description", id="host-gpu")
-        self._ping_input = Input(value=f"{profile.ping_ms}", placeholder="Ping (ms)", id="host-ping")
         self._motd_input = Input(value=profile.motd, placeholder="MOTD shown to clients", id="host-motd")
         self._log: Log | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="hosting-root"):
-            yield Label("Hosting Controls", id="hosting-title")
-            yield self._host_input
-            yield self._port_input
-            yield self._password_input
-            with Container(id="hosting-offer"):
-                yield Label("Server Details", id="hosting-offer-title")
-                yield self._desc_input
-                yield self._gpu_input
-                yield self._flops_input
-                yield self._ping_input
-                yield self._motd_input
-                yield Button("Save Server Details", id="hosting-save")
-            with Container(id="hosting-gpus"):
-                yield Label("Local GPUs", id="hosting-gpu-title")
-                gpu_table = self._gpu_table()
-                yield gpu_table
+            yield Label("Server Details", id="hosting-offer-title")
+            with Container(id="hosting-metadata"):
+                with Container(id="hosting-offer"):
+                    
+                    yield self._host_input
+                    yield self._port_input
+                    yield self._password_input
+                    yield self._gpu_input
+                    yield self._flops_input
+                    yield self._desc_input
+                    yield self._motd_input
+                with Container(id="hosting-gpus"):
+                    yield Label("Local GPUs", id="hosting-gpu-title")
+                    gpu_table = self._gpu_table()
+                    yield gpu_table
             with Container(id="hosting-buttons"):
                 yield Button("Start Hosting", id="hosting-start", variant="success")
                 yield Button("Stop Hosting", id="hosting-stop", variant="warning")
-                yield Button("Back", id="hosting-back")
             status = Label("", id="hosting-status")
             self._status = status
             yield status
-            with Container(id="hosting-log-box"):
-                yield Label("Hosting Log", id="hosting-log-title")
-                log = Log(id="hosting-log", highlight=False, auto_scroll=True)
-                self._log = log
-                yield log
+            log = Log(id="hosting-log", highlight=False, auto_scroll=True)
+            self._log = log
+            yield log
         yield Footer()
 
     def on_mount(self) -> None:
@@ -82,8 +77,6 @@ class HostingScreen(Screen[None]):
             self._append_log("Stopped hosting server.")
         elif event.button.id == "hosting-save":
             self._save_details()
-        elif event.button.id == "hosting-back":
-            self.app.pop_screen()
 
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
@@ -109,12 +102,12 @@ class HostingScreen(Screen[None]):
         try:
             flops = float(self._flops_input.value.strip())
         except ValueError:
-            flops = self._manager.get_billing_profile().flops_gflops
+            flops = self._manager.server_profile.flops_gflops
         try:
             ping = float(self._ping_input.value.strip())
         except ValueError:
-            ping = self._manager.get_billing_profile().ping_ms
-        self._manager.update_billing_profile(
+            ping = self._manager.server_profile.ping_ms
+        self._manager.update_server_profile(
             description=self._desc_input.value.strip() or "General compute",
             flops_gflops=flops,
             gpu_description=self._gpu_input.value.strip(),

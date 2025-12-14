@@ -69,10 +69,10 @@ def _gpus() -> List[Dict[str, object]]:
                 line = line.strip()
                 if line.lower().startswith("chipset model:"):
                     name = line.split(":", 1)[1].strip()
-                    gpus.append({"name": name, "total_mem_gb": "--", "compute": "Metal"})
+                    gpus.append({"name": name, "total_mem_gb": 0.0, "compute": "Metal"})
                     break
         except Exception:
-            gpus.append({"name": "Apple GPU", "total_mem_gb": "--", "compute": "Metal"})
+            gpus.append({"name": "Apple GPU", "total_mem_gb": 0.0, "compute": "Metal"})
     return gpus
 
 

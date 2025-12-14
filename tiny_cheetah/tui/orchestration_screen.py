@@ -7,7 +7,7 @@ from typing import Optional
 from textual.app import ComposeResult
 from textual.containers import Container
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Label, Static
+from textual.widgets import Footer, Header, Label, Static
 
 from tiny_cheetah.orchestration import get_peer_manager
 from tiny_cheetah.tui.connect_peer_screen import ConnectPeerScreen
@@ -33,65 +33,25 @@ class OrchestrationScreen(Screen[None]):
         super().__init__()
         self._manager = get_peer_manager()
         self._summary_panel: Optional[Static] = None
-        self._identity_panel: Optional[Static] = None
-        self._offer_panel: Optional[Static] = None
-        self._status_panel: Optional[Static] = None
         self._peer_panel: Optional[Static] = None
-        self._policy_panel: Optional[Static] = None
-        self._hardware_panel: Optional[Static] = None
+        self._hostmap_panel: Optional[Static] = None
         self._refresh_label: Optional[Label] = None
-        self._hosting_button: Optional[Button] = None
-        self._connect_button: Optional[Button] = None
-        self._peers_button: Optional[Button] = None
         self._last_refresh = time.time()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="orch-root"):
             with Container(id="orch-left"):
-                summary = Static(self._summary_text(), id="orch-summary")
-                self._summary_panel = summary
-                yield summary
-                with Container(id="identity-card"):
-                    identity = Static(self._identity_text(), id="orch-identity")
-                    self._identity_panel = identity
-                    yield identity
-                offer = Static(self._offer_text(), id="orch-offer")
-                self._offer_panel = offer
-                yield offer
-                status = Static(self._status_text(), id="orch-status")
-                self._status_panel = status
-                yield status
-                with Container(id="orch-actions"):
-                    hosting_button = Button("[h] Manage Server", id="nav-hosting")
-                    self._hosting_button = hosting_button
-                    yield hosting_button
-                    connect_button = Button("[n] Connect to Peer", id="nav-connect")
-                    self._connect_button = connect_button
-                    yield connect_button
-                    peers_button = Button("[p] Peer Directory", id="nav-peers")
-                    self._peers_button = peers_button
-                    yield peers_button
-                    yield Button("[esc] Main Menu", id="nav-back", variant="error")
-                help_text = Static("Last refreshed: --  (press [r] refresh)", id="orch-help")
-                self._refresh_label = help_text
-                yield help_text
+                local_panel = Static(self._local_node_text(), id="orch-local")
+                self._summary_panel = local_panel
+                yield local_panel
             with Container(id="orch-right"):
-                with Container(id="peer-section"):
-                    yield Label("Active Peers", classes="panel-title")
-                    peer_panel = Static(self._peer_listing(), id="peer-details")
-                    self._peer_panel = peer_panel
-                    yield peer_panel
-                with Container(id="policy-section"):
-                    yield Label("Connection Policy", classes="panel-title")
-                    policy_panel = Static(self._policy_listing(), id="policy-detail")
-                    self._policy_panel = policy_panel
-                    yield policy_panel
-                with Container(id="hardware-section"):
-                    yield Label("Host Hardware", classes="panel-title")
-                    hw_panel = Static(self._hardware_listing(), id="hardware-detail")
-                    self._hardware_panel = hw_panel
-                    yield hw_panel
+                network_panel = Static(self._network_map_text(), id="orch-network")
+                self._peer_panel = network_panel
+                yield network_panel
+                hostmap_panel = Static(self._host_map_text(), id="orch-hostmap")
+                self._hostmap_panel = hostmap_panel
+                yield hostmap_panel
         yield Footer()
 
     def on_mount(self) -> None:
@@ -100,19 +60,6 @@ class OrchestrationScreen(Screen[None]):
         self.set_interval(2.0, self._refresh_panels)
         self._refresh_panels()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "nav-back":
-            self.app.pop_screen()
-            return
-        handlers = {
-            "nav-hosting": self.action_open_hosting,
-            "nav-connect": self.action_open_connect,
-            "nav-peers": self.action_open_peers,
-        }
-        handler = handlers.get(event.button.id)
-        if handler:
-            handler()
-
     def action_pop_screen(self) -> None:
         """Allow Esc/b to return to main menu."""
         self.app.pop_screen()
@@ -120,122 +67,92 @@ class OrchestrationScreen(Screen[None]):
     def _refresh_panels(self) -> None:
         self._last_refresh = time.time()
         if self._summary_panel is not None:
-            self._summary_panel.update(self._summary_text())
-        if self._identity_panel is not None:
-            self._identity_panel.update(self._identity_text())
-        if self._offer_panel is not None:
-            self._offer_panel.update(self._offer_text())
-        if self._status_panel is not None:
-            self._status_panel.update(self._status_text())
+            self._summary_panel.update(self._local_node_text())
         if self._peer_panel is not None:
-            self._peer_panel.update(self._peer_listing())
-        if self._policy_panel is not None:
-            self._policy_panel.update(self._policy_listing())
-        if self._hardware_panel is not None:
-            self._hardware_panel.update(self._hardware_listing())
+            self._peer_panel.update(self._network_map_text())
+        if self._hostmap_panel is not None:
+            self._hostmap_panel.update(self._host_map_text())
         if self._refresh_label is not None:
-            self._refresh_label.update(self._refresh_text())
+            self._refresh_label.update("")
         self._update_action_variants()
 
-    def _identity_text(self) -> str:
-        return (
-            f"User: [bold]{self._manager.identity['username']}[/]\n"
-            f"Access: {'Password required' if self._manager.access_password_required() else 'Open'}"
-        )
-
-    def _offer_text(self) -> str:
-        profile = self._manager.get_billing_profile()
+    def _local_node_text(self) -> str:
+        profile = self._manager.server_profile
+        host_info = self._manager.get_host_info()
         ready = bool(profile.gpu_description or profile.flops_gflops)
-        status = "[green]LIVE[/]" if ready else "[yellow]DRAFT[/]"
-        flops_line = f"Compute: {profile.flops_gflops:.1f} GFLOPS" if profile.flops_gflops else "Compute: specify FLOPS"
-        gpu_line = f"GPU: {profile.gpu_description or 'Describe your GPU'}"
-        ping_line = f"Ping: {profile.ping_ms:.0f} ms" if profile.ping_ms else "Ping: --"
-        motd_line = f"MOTD: {profile.motd or 'Set a welcome message'}"
+        status = "[green]● Online[/]" if self._manager.peer_count() > 0 else "[red]● Offline[/]"
+        if not ready:
+            status = f"{status} [yellow](draft config)[/]"
+        cpu = host_info.get("cpu_count", "--")
+        ram = host_info.get("ram_gb", "--")
+        tc = host_info.get("tc_device", "")
+        gpus = host_info.get("gpus", []) or []
+        gpu_line = ", ".join(g.get("name", "GPU") for g in gpus) if gpus else "No GPUs"
+        config_line = f"GPU: {profile.gpu_description or gpu_line} | Ping: {profile.ping_ms or '--'} ms"
         return "\n".join(
             [
-                f"Server: {status}",
-                flops_line,
-                gpu_line,
-                ping_line,
-                motd_line,
+                "[b]Local Node Info[/]",
+                "Identity:",
+                f"- User: {self._manager.identity['username']}",
+                f"- Access: {'Password required' if self._manager.access_password_required() else 'Open'}",
+                f"- Status: {status}",
+                "",
+                "Hardware:",
+                f"- CPU cores: {cpu}",
+                f"- RAM: {ram} GB",
+                f"- GPUs: {gpu_line}",
+                f"- TC_DEVICE: {tc or 'not set'}",
+                "",
+                "Config:",
+                f"- {config_line}",
+                f"- MOTD: {profile.motd or 'Set a welcome message'}",
             ]
         )
 
-    def _status_text(self) -> str:
-        peers = len(self._manager.list_peers())
-        devices = ", ".join(self._manager.aggregate_devices()) or "local host"
-        hosting = "Online" if self._manager.peer_count() > 0 else "Offline"
-        return f"Host status: {hosting}\nConnected peers: {peers}\nDevice: {devices}"
-
-    def _summary_text(self) -> str:
-        profile = self._manager.get_billing_profile()
-        ready = bool(profile.gpu_description or profile.flops_gflops)
-        status = "live" if ready else "draft"
-        peers = len(self._manager.list_peers())
-        host_state = "Online" if self._manager.peer_count() > 0 else "Offline"
-        return f"{host_state} · {peers} peers · offer {status}"
-
-    def _peer_listing(self) -> str:
+    def _network_map_text(self) -> str:
         peers = self._manager.list_peers()
         if not peers:
-            return (
-                "[bold]No peers connected yet.[/]\n"
-                "You haven't discovered or connected to any peers.\n\n"
-                "[p] Open Peer Directory\n"
-                "[n] Connect to peer by address\n"
-                "LAN discovery runs automatically."
+            return "\n".join(
+                [
+                    "[b]Network / Peer Map[/]",
+                    "No peers connected.",
+                    "Press n to connect or p to open peer directory.",
+                ]
             )
-        lines = ["ID            Capability", "────────────────────────"]
-        for peer in peers[:6]:
-            flops = f"{peer.flops_gflops:.1f} GFLOPS" if peer.flops_gflops else "unspecified"
-            lines.append(f"{peer.username[:12]:<12}  {flops}")
-        if len(peers) > 6:
-            lines.append(f"… {len(peers) - 6} more (use [p] Peer Directory)")
-        else:
-            lines.append("Use [p] Peer Directory for peer actions.")
+        lines = ["[b]Network / Peer Map[/]", "This Device"]
+        for index, peer in enumerate(peers):
+            connector = "└──" if index == len(peers) - 1 else "├──"
+            status = "[green]●[/]" if peer.available else "[red]●[/]"
+            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) else "--"
+            hw = peer.device_report or {}
+            gpu_list = hw.get("gpus", [])
+            gpu_name = gpu_list[0].get("name", peer.gpu_description or "GPU") if gpu_list else (peer.gpu_description or "GPU")
+            flops = getattr(peer, "flops_gflops", 0) or hw.get("flops_gflops", "")
+            try:
+                flops_val = float(flops)
+                flops_text = f"{flops_val:.1f} GFLOPS" if flops_val else ""
+            except Exception:
+                flops_text = ""
+            hw_summary = f"{gpu_name}"
+            if flops_text:
+                hw_summary += f" / {flops_text}"
+            line = f"{connector} {status} {peer.username} [{hw_summary}] ({ping})"
+            lines.append(line)
         return "\n".join(lines)
 
-    def _policy_listing(self) -> str:
-        profile = self._manager.get_billing_profile()
-        flops = f"Compute: {profile.flops_gflops:.1f} GFLOPS" if profile.flops_gflops else "Compute: specify FLOPS"
-        gpu = f"GPU: {profile.gpu_description or 'Describe your GPU'}"
-        ping = f"Ping: {profile.ping_ms:.0f} ms" if profile.ping_ms else "Ping: --"
-        motd = profile.motd or "Set a welcome message so renters know what to expect."
-        return (
-            f"{flops}\n"
-            f"{gpu}\n"
-            f"{ping}\n"
-            "MOTD preview:\n"
-            f"{motd}\n\n"
-            "Renters see this information immediately after connecting."
-        )
-
-    def _hardware_listing(self) -> str:
-        info = self._manager.get_host_info()
-        cpu = info.get("cpu_count", "--")
-        ram = info.get("ram_gb", "--")
-        tc = info.get("tc_device", "")
-        gpus = info.get("gpus", []) or []
-        gpu_lines = []
-        for gpu in gpus:
-            gpu_lines.append(
-                f"- {gpu.get('name','GPU')} ({gpu.get('total_mem_gb','?')} GB, {gpu.get('compute','?')})"
-            )
-        if not gpu_lines:
-            gpu_lines.append("- No GPUs detected")
-        return "\n".join(
-            [
-                f"CPU cores: {cpu}",
-                f"RAM: {ram} GB",
-                f"TC_DEVICE: {tc or 'not set'}",
-                "GPUs:",
-                *gpu_lines,
-            ]
-        )
-
-    def _refresh_text(self) -> str:
-        return time.strftime("Last refreshed: %H:%M", time.localtime(self._last_refresh))
-
+    def _host_map_text(self) -> str:
+        peers = self._manager.list_peers()
+        lines = ["[b]Host Map[/]"]
+        local_status = "[green]■[/]" if self._manager.peer_count() > 0 else "[red]■[/]"
+        lines.append(f"{local_status} {self._manager.identity['username']}")
+        for peer in peers:
+            status = "[green]■[/]" if peer.available else "[red]■[/]"
+            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) else "--"
+            lines.append(f" ├─ {status} {peer.username} ({ping})")
+        if len(lines) == 2:
+            lines.append(" └─ No peers connected")
+        return "\n".join(lines)
+    
     # Textual actions ---------------------------------------------------------
     def action_refresh_panels(self) -> None:
         self._refresh_panels()
@@ -249,18 +166,5 @@ class OrchestrationScreen(Screen[None]):
     def action_open_peers(self) -> None:
         self.app.push_screen(PeerDirectoryScreen())
 
-    def _copy_to_clipboard(self, value: str, toast: str) -> None:
-        self.app.copy_to_clipboard(value)
-        if self._refresh_label is not None:
-            self._refresh_label.update(f"{self._refresh_text()} • {toast}")
-
     def _update_action_variants(self) -> None:
-        profile = self._manager.get_billing_profile()
-        offer_ready = bool(profile.gpu_description or profile.flops_gflops)
-        if self._connect_button is not None:
-            self._connect_button.variant = "primary" if offer_ready else "default"
-        if self._peers_button is not None:
-            peers = len(self._manager.list_peers())
-            self._peers_button.variant = "primary" if peers else "default"
-        if self._hosting_button is not None:
-            self._hosting_button.variant = "primary" if self._manager.peer_count() == 0 else "default"
+        return

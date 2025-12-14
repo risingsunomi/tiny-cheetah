@@ -1,12 +1,8 @@
-Screen {
-    background: $surface;
-    color: $text;
-}
-
 #orch-root {
     layout: horizontal;
     height: 1fr;
     padding: 1;
+    border: round $primary;
 }
 
 #orch-left,
@@ -15,18 +11,16 @@ Screen {
 }
 
 #orch-left {
-    width: 38%;
-    min-width: 32%;
+    width: 30%;
+    min-width: 28%;
     layout: vertical;
-    border: round $primary;
     padding: 1;
-    margin-right: 1;
+    border: round $primary;
 }
 
 #orch-right {
-    width: 1fr;
+    width: 70%;
     layout: vertical;
-    border: round $primary;
     padding: 1;
 }
 
@@ -40,75 +34,13 @@ Screen {
     margin-bottom: 0;
 }
 
-#orch-summary,
-#identity-card,
-#orch-offer,
-#orch-status {
+#orch-hostmap,
+#orch-network,
+#orch-help {
     border: round $primary;
     padding: 1;
 }
 
-#identity-card > * {
-    margin-bottom: 1;
-}
-
-#identity-card > *:last-child {
-    margin-bottom: 0;
-}
-
-#identity-actions {
-    layout: horizontal;
-}
-
-#identity-actions Button {
-    margin-right: 1;
-}
-
-#identity-actions Button:last-child {
-    margin-right: 0;
-}
-
-#orch-menu {
-    border: round $primary;
-    padding: 1;
-}
-
-#orch-menu > * {
-    margin-bottom: 1;
-}
-
-#orch-menu > *:last-child {
-    margin-bottom: 0;
-}
-
-#orch-menu Button {
-    align: left middle;
-}
-
-.menu-heading {
-    text-style: bold;
-}
-
-.panel-title {
-    text-style: bold;
-    margin-top: 1;
-}
-
-#peer-section,
-#policy-section,
-#hardware-section {
-    border: round $primary;
-    padding: 1;
-}
-
-#peer-details,
-#policy-detail,
-#hardware-detail {
-    margin-top: 1;
-}
-
-#orch-help,
-#refresh-label {
-    border: round $secondary;
-    padding: 1;
+#orch-hostmap {
+    height: 60%;
 }

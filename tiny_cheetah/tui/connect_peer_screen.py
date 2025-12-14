@@ -33,7 +33,6 @@ class ConnectPeerScreen(Screen[None]):
             yield self._password
             with Container(id="connect-actions"):
                 yield Button("Connect", id="connect-btn", variant="primary")
-                yield Button("Back", id="connect-back")
             status = Label("", id="connect-status")
             self._status = status
             yield status
@@ -45,8 +44,6 @@ class ConnectPeerScreen(Screen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "connect-btn":
             self._connect_peer()
-        elif event.button.id == "connect-back":
-            self.app.pop_screen()
 
     def action_pop_screen(self) -> None:
         self.app.pop_screen()

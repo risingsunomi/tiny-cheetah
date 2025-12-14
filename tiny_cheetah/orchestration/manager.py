@@ -10,13 +10,17 @@ try:
 except Exception:  # pragma: no cover - optional
     torch = None
 
-from tiny_cheetah.billing import BillingProfile
+
+import logging
+
 from tiny_cheetah.user_management.identity import generate_identity
 from .device_info import collect_host_info
 from .discovery import DiscoveryService
 from .peer import PeerInfo
-from .server import PeerServer
+from .server import PeerServer, ServerProfile
 from .client import PeerClient
+
+logger = logging.getLogger(__name__)
 
 
 class PeerManager:
@@ -24,7 +28,6 @@ class PeerManager:
 
     def __init__(self) -> None:
         self.identity = generate_identity(username=f"cheetah-{uuid.uuid4().hex[:6]}")
-        self.billing_profile = BillingProfile()
         self._peers: Dict[str, PeerInfo] = {}
         self._listeners: List[Callable[[], None]] = []
         self._lock = threading.RLock()
@@ -39,6 +42,8 @@ class PeerManager:
         self._discovery.start(self._on_discovered_peer)
         self._host_info = collect_host_info()
         self._gpu_info = self._detect_gpus()
+
+        self.server_profile = ServerProfile()
 
     # Listener hooks -------------------------------------------------
     def add_listener(self, callback: Callable[[], None]) -> None:
@@ -119,17 +124,14 @@ class PeerManager:
         """Return only devices attached to this host."""
         return ["local-host"] if self._server is not None else []
 
-    def get_billing_profile(self) -> BillingProfile:
-        return self.billing_profile
-
     def get_gpu_inventory(self) -> List[dict]:
         return list(self._gpu_info)
 
     def get_host_info(self) -> dict:
         """Return CPU/RAM/GPU/TC_DEVICE info for this host."""
         return dict(self._host_info)
-
-    def update_billing_profile(
+    
+    def update_server_profile(
         self,
         *,
         description: str,
@@ -138,11 +140,11 @@ class PeerManager:
         ping_ms: float,
         motd: str,
     ) -> None:
-        self.billing_profile.description = description
-        self.billing_profile.flops_gflops = flops_gflops
-        self.billing_profile.gpu_description = gpu_description
-        self.billing_profile.ping_ms = ping_ms
-        self.billing_profile.motd = motd
+        self.server_profile.description = description
+        self.server_profile.flops_gflops = flops_gflops
+        self.server_profile.gpu_description = gpu_description
+        self.server_profile.ping_ms = ping_ms
+        self.server_profile.motd = motd
         if self._server is not None:
             self._server.identity = self._identity_payload()
         self._notify()
@@ -156,13 +158,14 @@ class PeerManager:
         return client.dispatch_tensor(payload)
 
     def schedule_tensor(self, payload: dict, prefer_peer_id: Optional[str] = None) -> dict:
-        """Route a tensor job to an available peer, otherwise wait for local availability."""
-        target = prefer_peer_id or next(iter(self._peers.keys()), None)
+        """Route a tensor job to an available peer, otherwise serialize on the local host."""
+        with self._lock:
+            target = prefer_peer_id if prefer_peer_id in self._peers else next(iter(self._peers), None)
         if target:
             try:
                 return self.request_remote_compute(target, payload)
-            except Exception:
-                pass
+            except Exception as exc:  # pragma: no cover - best-effort logging
+                logger.warning("Remote dispatch failed for %s: %s", target, exc)
         with self._host_lock:
             while self._host_busy:
                 self._host_lock.wait()
@@ -177,11 +180,11 @@ class PeerManager:
     def _identity_payload(self) -> dict:
         payload = dict(self.identity)
         payload["offer"] = {
-            "description": self.billing_profile.description,
-            "flops_gflops": self.billing_profile.flops_gflops,
-            "gpu_description": self.billing_profile.gpu_description,
-            "ping_ms": self.billing_profile.ping_ms,
-            "motd": self.billing_profile.motd,
+            "description": self.server_profile.description,
+            "flops_gflops": self.server_profile.flops_gflops,
+            "gpu_description": self.server_profile.gpu_description,
+            "ping_ms": self.server_profile.ping_ms,
+            "motd": self.server_profile.motd,
         }
         payload["devices"] = self._local_devices()
         payload["hardware"] = self._host_info
@@ -234,20 +237,11 @@ class PeerManager:
 
     # Misc ----------------------------------------------------------------------
     def _tensor_callback(self, payload: dict) -> dict:
-        with self._host_lock:
-            while self._host_busy:
-                self._host_lock.wait()
-            self._host_busy = True
-        try:
-            # Placeholder for actual tensor execution.
-            return {
-                "echo": payload,
-                "notice": "Remote execution not implemented in this build.",
-            }
-        finally:
-            with self._host_lock:
-                self._host_busy = False
-                self._host_lock.notify_all()
+        # Placeholder for actual tensor execution. schedule_tensor handles locking.
+        return {
+            "echo": payload,
+            "notice": "Remote execution not implemented in this build.",
+        }
 
 
 _MANAGER: Optional[PeerManager] = None

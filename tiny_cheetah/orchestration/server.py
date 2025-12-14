@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import socketserver
 import threading
@@ -60,3 +61,11 @@ class PeerServer(socketserver.ThreadingTCPServer):
         self.shutdown()
         if self._thread:
             self._thread.join(timeout=1.0)
+
+@dataclass
+class ServerProfile:
+    description: str = ""
+    flops_gflops: float = 0.0
+    gpu_description: str = ""
+    ping_ms: float = 0.0
+    motd: str = ""

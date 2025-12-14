@@ -15,8 +15,7 @@ class PeerInfo:
     flops_gflops: float = 0.0
     gpu_description: str = ""
     ping_ms: float = 0.0
-    offer_description: str = ""
-    payment_instructions: str = ""
+    description: str = ""
     motd: str = ""
     available: bool = True
     latency_ms: float = 0.0
