@@ -79,10 +79,7 @@ class OrchestrationScreen(Screen[None]):
     def _local_node_text(self) -> str:
         profile = self._manager.server_profile
         host_info = self._manager.get_host_info()
-        ready = bool(profile.gpu_description or profile.flops_gflops)
         status = "[green]● Online[/]" if self._manager.peer_count() > 0 else "[red]● Offline[/]"
-        if not ready:
-            status = f"{status} [yellow](draft config)[/]"
         cpu = host_info.get("cpu_count", "--")
         ram = host_info.get("ram_gb", "--")
         tc = host_info.get("tc_device", "")
@@ -123,7 +120,7 @@ class OrchestrationScreen(Screen[None]):
         for index, peer in enumerate(peers):
             connector = "└──" if index == len(peers) - 1 else "├──"
             status = "[green]●[/]" if peer.available else "[red]●[/]"
-            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) else "--"
+            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
             hw = peer.device_report or {}
             gpu_list = hw.get("gpus", [])
             gpu_name = gpu_list[0].get("name", peer.gpu_description or "GPU") if gpu_list else (peer.gpu_description or "GPU")
@@ -147,7 +144,7 @@ class OrchestrationScreen(Screen[None]):
         lines.append(f"{local_status} {self._manager.identity['username']}")
         for peer in peers:
             status = "[green]■[/]" if peer.available else "[red]■[/]"
-            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) else "--"
+            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
             lines.append(f" ├─ {status} {peer.username} ({ping})")
         if len(lines) == 2:
             lines.append(" └─ No peers connected")

@@ -27,13 +27,25 @@ from tiny_cheetah.orchestration import get_peer_manager
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 
 from textual.app import ComposeResult
+from textual import work
 from textual.binding import Binding
 from textual.containers import Container
 from textual.events import Mount
 from textual.message import Message
 from textual.message_pump import MessagePump
 from textual.screen import Screen, ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, RichLog, Static
+from textual.widgets import ( 
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    RichLog,
+    Static,
+    LoadingIndicator
+)
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -50,10 +62,10 @@ class ChatScreen(Screen[None]):
 
     CSS_PATH = Path(__file__).with_name("chat_menu.tcss")
 
-    BINDINGS = [
-        Binding("escape", "pop_screen", "Back"),
-        Binding("ctrl+s", "open_model_picker", "Select Model"),
-        Binding("ctrl+b", "pop_screen", "Menu"),
+    BINDINGS = [("escape", "pop_screen", "Back"),
+        ("b", "pop_screen", "Back"),
+        ("ctrl+s", "open_model_picker", "Select Model"),
+        ("ctrl+n", "open_orchestration", "Network Nodes")
     ]
 
     def __init__(self, default_model: str | None = None, offline: bool = False) -> None:
@@ -86,9 +98,7 @@ class ChatScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        peer_label = Label("Nodes: 0", id="peer-counter")
-        self._peer_label = peer_label
-        yield peer_label
+        yield LoadingIndicator(id="chat-loading-indicator")
         with Container(id="chat-root"):
             with Container(id="chat-body"):
                 with Container(id="chat-history"):
@@ -112,6 +122,7 @@ class ChatScreen(Screen[None]):
                         load_button = Button("Load Model", id="load-model")
                         self._load_button = load_button
                         yield load_button
+                        yield Button("Clear Model", id="clear-model", variant="error")
                     with Static(id="nodes-panel"):
                         yield Label("Nodes", classes="panel-title")
                         yield Label("Self", id="nodes-value")
@@ -120,27 +131,25 @@ class ChatScreen(Screen[None]):
                         stats_value = Label("Tokens/sec: --", id="stats-value")
                         self._stats_label = stats_value
                         yield stats_value
-                    with Static(id="actions-panel"):
-                        yield Label("Actions", classes="panel-title")
-                        yield Button("Clear Model", id="clear-model", variant="error")
-                        yield Button("Network Nodes", id="open-orchestration")
-                        yield Button("Back to Menu", id="chat-back")
             yield Input(placeholder="Type a prompt and press Enter…", id="chat-input")
         yield Footer()
 
     async def on_mount(self, _: Mount) -> None:
         self._chat_log = self.query_one("#chat-log", RichLog)
         self._input = self.query_one("#chat-input", Input)
-        if self._input is not None:
-            self.call_after_refresh(self._input.focus)
+        # if self._input is not None:
+        #     self.call_after_refresh(self._input.focus)
         if self._model_label is not None:
             self._model_label.update(self._model_id or "<select>")
-        self.set_interval(2.0, self._update_peer_banner)
         await self._initialize_chat_logs()
 
     def action_open_model_picker(self) -> None:
         self._open_model_picker()
 
+    def action_open_orchestration(self) -> None:
+        self.app.push_screen(OrchestrationScreen())
+
+    @work(thread=True)
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "open-model-picker":
             self._open_model_picker()
@@ -151,12 +160,26 @@ class ChatScreen(Screen[None]):
             if self._model is not None and self._tokenizer is not None:
                 self._log_sys_msg("Model already loaded.")
                 return
+            
+            if self._loading_in_progress:
+                self._log_sys_msg("Model load already in progress…")
+                return
+            if not self._model_id:
+                self._log_sys_msg("No model selected to load.")
+                return
+
+            self._loading_in_progress = True
+            self._set_load_button_enabled(False)
+            self._log_sys_msg(f"Loading model '{self._model_id}'...")
+            self._log_sys_msg("Preparing model load…")
+            self.action_toggle_loading()
             await self._start_model_load()
+            self.action_toggle_loading()
         elif event.button.id == "chat-back":
-            self._clear_model()
+            self._clear_model(persist=False)
             self.app.pop_screen()
         elif event.button.id == "clear-model":
-            self._clear_model()
+            self._clear_model(persist=True)
         elif event.button.id == "new-chat-log":
             await self._create_new_log()
         elif event.button.id == "load-chat-log":
@@ -187,9 +210,15 @@ class ChatScreen(Screen[None]):
         if self._model_label is not None:
             self._model_label.update(result)
         asyncio.create_task(self._update_current_log_model_async())
-        self._log_sys_msg(f"Model set to '{result}'.")
-        self._log_sys_msg("Click 'Load Model' to download weights into memory.")
+        self._log_sys_msg(f"Model set to '{result}'.", persist=False)
+        self._log_sys_msg("Click 'Load Model' to download weights into memory.", persist=False)
 
+    def action_pop_screen(self) -> None:
+        """Allow Esc/b bindings to exit the chat screen cleanly."""
+        self._clear_model(persist=False)
+        self.app.pop_screen()
+
+    
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":
             content = event.value.strip()
@@ -237,6 +266,7 @@ class ChatScreen(Screen[None]):
         )
         if persist:
             self._record_message("user", content, entry_time)
+        self._chat_log.scroll_end(animate=False, force=True)
 
     def _append_system(
         self,
@@ -253,6 +283,7 @@ class ChatScreen(Screen[None]):
         )
         if persist:
             self._record_message("system", content, entry_time)
+        self._chat_log.scroll_end(animate=False, force=True)
 
     def _append_model(
         self,
@@ -270,7 +301,8 @@ class ChatScreen(Screen[None]):
         )
         if persist:
             self._record_message("assistant", content, entry_time)
-            
+        self._chat_log.scroll_end(animate=False, force=True)
+
     def _write_to_chat_log(self, message: str) -> None:
         if self._chat_log is None:
             return
@@ -552,11 +584,6 @@ class ChatScreen(Screen[None]):
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("Failed to update log model mapping: %s", exc)
 
-    def _update_peer_banner(self) -> None:
-        if self._peer_label is not None:
-            count = self._peer_manager.peer_count()
-            self._peer_label.update(f"Nodes: {count}")
-
     @staticmethod
     def _parse_log_item_id(item_id: Optional[str]) -> Optional[int]:
         if not item_id:
@@ -580,11 +607,13 @@ class ChatScreen(Screen[None]):
             return
         if self._generating_resp:
             return
+        self.action_toggle_loading()
         task = asyncio.create_task(self._generate_response())
         self._generation_task = task
         task.add_done_callback(self._on_generation_task_done)
 
     def _on_generation_task_done(self, task: asyncio.Future) -> None:
+        self.action_toggle_loading()
         self._generation_task = None
         if task.cancelled():
             return
@@ -594,27 +623,7 @@ class ChatScreen(Screen[None]):
             traceback.print_exception(type(exc), exc, exc.__traceback__)
             self._log_sys_msg(f"Error: {exc}")
 
-    async def _start_model_load(
-        self,
-        on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None
-    ) -> None:
-        if self._loading_in_progress:
-            self._log_sys_msg("Model load already in progress…")
-            if on_complete is not None:
-                self._post_load_callbacks.append(on_complete)
-            return
-        if not self._model_id:
-            self._log_sys_msg("No model selected to load.")
-            return
-
-        if on_complete is not None:
-            self._post_load_callbacks.append(on_complete)
-
-        self._loading_in_progress = True
-        self._set_load_button_enabled(False)
-        await self._log_sys_msg_async(f"Loading model '{self._model_id}'...")
-        await self._log_sys_msg_async("Preparing model load…")
-
+    async def _start_model_load(self) -> None:
         # loaded_model = self._load_model()
         try:
             model, model_config, tokenizer, model_path, elapsed = await self._load_model_async()
@@ -715,6 +724,7 @@ class ChatScreen(Screen[None]):
         await self._log_sys_msg_async(f"Instantiating model wtih shard {shard}")
         # causing segmentation fault on macosx METAL
         # model = await asyncio.to_thread(Model, model_config, shard)
+        
         model = Model(model_config, shard)
         await self._log_sys_msg_async(f"Model instantiated. {model}")
         await self._log_sys_msg_async("Loading weights…")
@@ -840,8 +850,9 @@ class ChatScreen(Screen[None]):
         if len(self._history) > 6:
             self._history = self._history[-6:]
 
-    def _clear_model(self, *, persist: bool = True) -> None:
-        self._log_sys_msg("Clearing loaded model.", persist=persist)
+    def _clear_model(self, *, persist: bool = False) -> None:
+        if persist:
+            self._log_sys_msg("Clearing loaded model.", persist=True)
         if hasattr(self, "_model") and self._model is not None and hasattr(self._model, "reset_kv_cache"):
             self._model.reset_kv_cache()
         self._model = None
@@ -856,8 +867,15 @@ class ChatScreen(Screen[None]):
         self._pending_generation = False
         if not self._loading_in_progress:
             self._set_load_button_enabled(True)
-        self._log_sys_msg("Model cleared. Select and load a model to continue.", persist=persist)
+        if persist:
+            self._log_sys_msg("Model cleared. Select and load a model to continue.", persist=persist)
 
+    def action_toggle_loading(self) -> None:
+        # This calls for loading indicator by chaning css visibility
+        loading_indicator = self.query_one("#chat-loading-indicator", LoadingIndicator)
+        if loading_indicator is not None:
+            current_visibility = loading_indicator.styles.visibility
+            loading_indicator.styles.visibility = "visible" if current_visibility == "hidden" else "hidden"
 
 class ChatLogNameModal(ModalScreen[Optional[str]]):
     """Modal dialog to capture a chat log name."""
@@ -880,7 +898,7 @@ class ChatLogNameModal(ModalScreen[Optional[str]]):
     def on_mount(self) -> None:
         if self._input is not None:
             self._input.value = self._initial
-            self.call_after_refresh(self._input.focus)
+            # self.call_after_refresh(self._input.focus)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "chat-log-name-cancel":

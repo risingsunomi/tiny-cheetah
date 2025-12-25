@@ -1,7 +1,3 @@
-Screen {
-    background: $surface;
-}
-
 #chat-root {
     layout: vertical;
     height: 1fr;
@@ -155,4 +151,10 @@ ModalScreen#chat-log-confirm-modal {
     text-align: right;
     padding: 0 2;
     color: $text-muted;
+}
+
+#chat-loading-indicator {
+    height: 1;
+    background: transparent;
+    visibility: hidden;
 }

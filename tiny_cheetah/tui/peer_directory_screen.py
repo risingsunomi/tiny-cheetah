@@ -122,7 +122,7 @@ class PeerDirectoryScreen(Screen[None]):
 
     def _peer_row(self, peer: PeerInfo) -> list[str]:
         lock = "🔒" if peer.metadata.get("password") else ""
-        ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) else "--"
+        ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
         hw = peer.device_report or {}
         cpu = hw.get("cpu_count", "--")
         ram = hw.get("ram_gb", "--")

@@ -13,6 +13,10 @@ setup(
         "transformers",
         "asyncio",
         "zstandard",
-        "dotenv"
+        "dotenv",
+        "huggingface-hub",
+        "python-dotenv",
+        "tokenizers",
+        "zstandard",
     ],
 )

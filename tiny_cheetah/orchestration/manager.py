@@ -69,12 +69,16 @@ class PeerManager:
         if self._server is not None:
             self._server.stop()
             self._server = None
-            self._notify()
+        with self._lock:
+            self._peers.clear()
+        self._notify()
 
     # Connections ---------------------------------------------------------------
     def connect_to_peer(self, address: str, port: int, devices: Optional[List[str]] = None, password: str = "") -> PeerInfo:
+        start = time.time()
         client = PeerClient(address, port, self.identity, password=password)
         identity = client.handshake()
+        ping_ms = max((time.time() - start) * 1000.0, 0.0)
         offer = identity.get("offer", {})
         hardware = identity.get("hardware", {})
         with self._lock:
@@ -87,7 +91,7 @@ class PeerManager:
                 devices=devices or identity.get("devices", []),
                 flops_gflops=float(offer.get("flops_gflops", 0.0)),
                 gpu_description=offer.get("gpu_description", ""),
-                ping_ms=float(offer.get("ping_ms", 0.0)),
+                ping_ms=ping_ms or float(offer.get("ping_ms", 0.0)),
                 offer_description=offer.get("description", ""),
                 motd=offer.get("motd", ""),
                 device_report=hardware,
