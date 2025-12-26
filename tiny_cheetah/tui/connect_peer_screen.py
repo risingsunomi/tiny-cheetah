@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -44,6 +45,7 @@ class ConnectPeerScreen(Screen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "connect-btn":
             self._connect_peer()
+        self._discover_peers()
 
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
@@ -64,7 +66,7 @@ class ConnectPeerScreen(Screen[None]):
         except Exception as exc:
             self._set_status(str(exc))
             return
-        self._set_status(f"Connected to {peer.username} @ {peer.address}")
+        self._set_status(f"Connected to {peer.peer_id}")
         self._show_host_info(peer)
 
     def _set_status(self, message: str) -> None:
@@ -72,14 +74,25 @@ class ConnectPeerScreen(Screen[None]):
             self._status.update(message)
 
     def _show_host_info(self, peer: PeerInfo) -> None:
-        motd = peer.motd or "No welcome message provided."
+        motd = peer.metadata.get("motd", "No welcome message provided.") if hasattr(peer, "metadata") else "No welcome message provided."
         flops = f"{peer.flops_gflops:.1f} GFLOPS" if getattr(peer, "flops_gflops", 0) else "unspecified"
         policy = f"Compute: {flops}"
         lines = [
-            f"Host: [bold]{peer.username}[/]",
+            f"Host: [bold]{peer.peer_id}[/]",
             f"Devices: {', '.join(peer.devices) or 'unknown'}",
             policy,
         ]
         lines.append(f"MOTD: {motd}")
         if self._host_info is not None:
             self._host_info.update("\n".join(lines))
+
+    async def on_mount(self) -> None:
+        await asyncio.to_thread(self._discover_peers)
+        self.set_interval(1.0, self._discover_peers)
+
+    def _discover_peers(self) -> None:
+        if self.app is None:
+            return
+        self._manager.discover_peers()
+        count = self._manager.peer_count()
+        self.app.sub_title = f"Active Nodes {count}"

@@ -17,11 +17,16 @@ Fast local training and inference using Tinygrad.
 ## About
 WIP local TUI based model conversation and training at home interface with distributed network based inference.
 
-TLDR: Chat and train models at home with all your devices and MMO with other users
+TLDR: Chat and train models at home with all your devices and online with other users
 
 ## Progress
-### 10/27/2025
-Working chat interface and training interface but more UX work and optimization needed. We are finding there is this freezing or delay when loading a model into memory while in the chat interface. For training, better stop before running out of memory points will be needed as causing it to run unmanaged will thrash swap memory. Integrating tinyjit and quantization model usage for faster tokens/sec
+### 12/25/2025
+- Chat: fast log restore, silent model clearing, auto-scroll, and streamlined escape/back navigation.
+- Train: stable UI with network node counter; training path editor separated into its own screen.
+- Network/Orchestration: free, password-optional compute sharing (no billing). Host/peer hardware reports (CPU/RAM/GPU, TC_DEVICE), LAN discovery, manual connect, peer directory with HL-style server list (lock/name/CPU+RAM/GPU/ping), ASCII host map with status colors, and a host manage screen with GPU inventory + server details.
+- Scheduler: remote-first tensor dispatch with local fallback serialization, basic ping measurement on connect.
+- Identity: lightweight username/fingerprint, PGP removed.
+
 
 ## Network Orchestration
 Tiny Cheetah now includes an experimental orchestration layer so users can lend or borrow compute from each other.

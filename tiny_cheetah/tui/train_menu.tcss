@@ -1,7 +1,3 @@
-Screen {
-    background: $surface;
-}
-
 #peer-counter {
     text-align: right;
     padding: 0 2;

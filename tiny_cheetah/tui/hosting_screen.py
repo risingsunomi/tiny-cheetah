@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -61,12 +62,14 @@ class HostingScreen(Screen[None]):
             yield log
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         if self._log is not None:
             # Defer log seeding until the app is active.
             self.call_after_refresh(
                 lambda: self._log.write_line("Host activity will appear here once you start or stop the server.")
             )
+        await asyncio.to_thread(self._discover_peers)
+        self.set_interval(1.0, self._discover_peers)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "hosting-start":
@@ -124,6 +127,13 @@ class HostingScreen(Screen[None]):
     def _append_log(self, message: str) -> None:
         if self._log is not None:
             self._log.write_line(message)
+
+    def _discover_peers(self) -> None:
+        if self.app is None:
+            return
+        self._peer_manager.discover_peers()
+        count = self._manager.peer_count()
+        self.app.sub_title = f"Active Nodes {count}"
 
     def _gpu_table(self) -> Label:
         info = self._manager.get_gpu_inventory()

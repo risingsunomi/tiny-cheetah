@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import copy
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -13,7 +14,6 @@ from threading import Event, Thread
 from typing import Dict, Iterable, List, Optional
 
 from textual.app import ComposeResult
-from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
@@ -147,7 +147,10 @@ class TrainScreen(Screen[None]):
     CSS_PATH = Path(__file__).with_name("train_menu.tcss")
 
     BINDINGS = [
-        Binding("escape", "pop_screen", "Back"),
+        ("escape", "pop_screen", "Back"),
+        ("s", "start_training", "Start training"),
+        ("x", "stop_training", "Stop training"),
+        ("n", "open_network", "Network"),
     ]
 
     @staticmethod
@@ -186,18 +189,10 @@ class TrainScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        peer_label = Label("Nodes: 0", id="peer-counter")
-        self._peer_label = peer_label
-        yield peer_label
         with Container(id="train-root"):
             with Container(id="train-left"):
                 yield Static("Training Console", id="model-banner")
                 yield Log(id="train-log", highlight=False, auto_scroll=True)
-                with Container(id="control-row"):
-                    yield Button("Start", id="start-training", variant="primary")
-                    yield Button("Stop", id="stop-training", disabled=True)
-                    yield Button("Network", id="open-network")
-                    yield Button("Back", id="back-to-menu")
             with Container(id="train-right"):
                 with VerticalScroll(id="train-right-scroll"):
                     with Container(id="train-right-content"):
@@ -224,6 +219,7 @@ class TrainScreen(Screen[None]):
                             yield Label("Memory: --", id="resource-ram")
                             yield Label("GPU: --", id="resource-gpu")
                             yield Label("Nodes: --", id="resource-peers")
+        yield Footer()
 
     def apply_default_settings(self, defaults: Dict[str, object]) -> None:
         for key, value in defaults.items():
@@ -240,7 +236,7 @@ class TrainScreen(Screen[None]):
         if getattr(self, "_settings_summary", None):
             self._update_settings_summary()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self._log = self.query_one("#train-log", Log)
         if self._log is not None:
             self._log.clear()
@@ -268,6 +264,8 @@ class TrainScreen(Screen[None]):
             self._path_summary_label = self.query_one("#training-path-summary", Label)
         self._update_settings_summary()
         self.set_interval(2.0, self._update_peer_banner)
+        await asyncio.to_thread(self._discover_peers)
+        self.set_interval(1.0, self._discover_peers)
 
         self._poll_timer = self.set_interval(0.25, self._poll_training_output, pause=True)
         self._resource_timer = self.set_interval(1.0, self._update_resource_usage)
@@ -286,24 +284,9 @@ class TrainScreen(Screen[None]):
             self._resource_timer = None
         if self._training is not None and self._training.is_running():
             self._training.terminate()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "start-training":
-            self._start_training()
-        elif button_id == "stop-training":
-            self._stop_training()
-        elif button_id == "back-to-menu":
-            if self._training and self._training.is_running():
-                self._append_log("[warn] Stop training before returning to the menu.")
-            else:
-                self.app.pop_screen()
-        elif button_id == "open-settings":
-            self._open_settings()
-        elif button_id == "open-training-path":
-            self._open_training_path()
-        elif button_id == "open-network":
-            self.app.push_screen(OrchestrationScreen())
+    
+    def action_pop_screen(self) -> None:
+        self.app.pop_screen()
 
     def _open_settings(self) -> None:
         screen = TrainSettingsScreen(dict(self._settings))
@@ -667,13 +650,20 @@ class TrainScreen(Screen[None]):
             count = self._peer_manager.peer_count()
             self._peer_label.update(f"Nodes: {count}")
 
+    def _discover_peers(self) -> None:
+        if self.app is None:
+            return
+        self._peer_manager.discover_peers()
+        count = self._peer_manager.peer_count()
+        self.app.sub_title = f"Active Nodes {count}"
+
 
 class TrainSettingsScreen(ModalScreen[Dict[str, object]]):
     """Modal for editing training invocation settings."""
 
     CSS_PATH = Path(__file__).with_name("train_menu.tcss")
 
-    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+    BINDINGS = [("escape", "pop_screen", "Back")]
 
     def __init__(self, values: Dict[str, object]) -> None:
         super().__init__(id="train-settings")
@@ -716,6 +706,9 @@ class TrainSettingsScreen(ModalScreen[Dict[str, object]]):
         first = self._inputs.get("model-id")
         if isinstance(first, Input):
             self.call_after_refresh(first.focus)
+    
+    def action_pop_screen(self) -> None:
+        self.app.pop_screen()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "settings-cancel":

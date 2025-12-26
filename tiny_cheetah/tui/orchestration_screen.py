@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -54,14 +55,26 @@ class OrchestrationScreen(Screen[None]):
                 yield hostmap_panel
         yield Footer()
 
-    def on_mount(self) -> None:
-        if self.app is not None:
-            self.app.sub_title = "Host Dashboard · Active Peers"
+    async def on_mount(self) -> None:
+        await asyncio.to_thread(self._discover_peers)
+        self.set_interval(1.0, self._discover_peers)
         self.set_interval(2.0, self._refresh_panels)
         self._refresh_panels()
 
+    # Textual actions ---------------------------------------------------------
+    def action_refresh_panels(self) -> None:
+        self._refresh_panels()
+
+    def action_open_hosting(self) -> None:
+        self.app.push_screen(HostingScreen())
+
+    def action_open_connect(self) -> None:
+        self.app.push_screen(ConnectPeerScreen())
+
+    def action_open_peers(self) -> None:
+        self.app.push_screen(PeerDirectoryScreen())
+    
     def action_pop_screen(self) -> None:
-        """Allow Esc/b to return to main menu."""
         self.app.pop_screen()
 
     def _refresh_panels(self) -> None:
@@ -76,10 +89,18 @@ class OrchestrationScreen(Screen[None]):
             self._refresh_label.update("")
         self._update_action_variants()
 
+    def _discover_peers(self) -> None:
+        if self.app is None:
+            return
+        self._manager.discover_peers()
+        count = self._manager.peer_count()
+        self.app.sub_title = f"Host Dashboard · Active Nodes {count}"
+
     def _local_node_text(self) -> str:
         profile = self._manager.server_profile
         host_info = self._manager.get_host_info()
-        status = "[green]● Online[/]" if self._manager.peer_count() > 0 else "[red]● Offline[/]"
+        online = self._manager.is_hosting() or bool(self._manager.list_peers())
+        status = "[green]● Online[/]" if online else "[red]● Offline[/]"
         cpu = host_info.get("cpu_count", "--")
         ram = host_info.get("ram_gb", "--")
         tc = host_info.get("tc_device", "")
@@ -90,7 +111,7 @@ class OrchestrationScreen(Screen[None]):
             [
                 "[b]Local Node Info[/]",
                 "Identity:",
-                f"- User: {self._manager.identity['username']}",
+                f"- Node: {self._manager.peer_id}",
                 f"- Access: {'Password required' if self._manager.access_password_required() else 'Open'}",
                 f"- Status: {status}",
                 "",
@@ -133,35 +154,25 @@ class OrchestrationScreen(Screen[None]):
             hw_summary = f"{gpu_name}"
             if flops_text:
                 hw_summary += f" / {flops_text}"
-            line = f"{connector} {status} {peer.username} [{hw_summary}] ({ping})"
+            line = f"{connector} {status} {peer.peer_id} [{hw_summary}] ({ping})"
             lines.append(line)
         return "\n".join(lines)
 
     def _host_map_text(self) -> str:
         peers = self._manager.list_peers()
         lines = ["[b]Host Map[/]"]
-        local_status = "[green]■[/]" if self._manager.peer_count() > 0 else "[red]■[/]"
-        lines.append(f"{local_status} {self._manager.identity['username']}")
+        online = self._manager.is_hosting() or bool(peers)
+        local_status = "[green]■[/]" if online else "[red]■[/]"
+        lines.append(f"{local_status} {self._manager.peer_id}")
         for peer in peers:
             status = "[green]■[/]" if peer.available else "[red]■[/]"
             ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
-            lines.append(f" ├─ {status} {peer.username} ({ping})")
+            lines.append(f" ├─ {status} {peer.peer_id} ({ping})")
         if len(lines) == 2:
             lines.append(" └─ No peers connected")
         return "\n".join(lines)
     
-    # Textual actions ---------------------------------------------------------
-    def action_refresh_panels(self) -> None:
-        self._refresh_panels()
-
-    def action_open_hosting(self) -> None:
-        self.app.push_screen(HostingScreen())
-
-    def action_open_connect(self) -> None:
-        self.app.push_screen(ConnectPeerScreen())
-
-    def action_open_peers(self) -> None:
-        self.app.push_screen(PeerDirectoryScreen())
+    
 
     def _update_action_variants(self) -> None:
         return

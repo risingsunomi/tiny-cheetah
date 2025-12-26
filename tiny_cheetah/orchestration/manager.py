@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import socket
+import json
 import threading
-import time
 import uuid
-from typing import Callable, Dict, List, Optional
+import time
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:
     import torch  # type: ignore
@@ -11,116 +13,115 @@ except Exception:  # pragma: no cover - optional
     torch = None
 
 
-import logging
+from tiny_cheetah.logging_utils import get_logger
+import os
 
-from tiny_cheetah.user_management.identity import generate_identity
 from .device_info import collect_host_info
-from .discovery import DiscoveryService
-from .peer import PeerInfo
-from .server import PeerServer, ServerProfile
-from .client import PeerClient
+from tiny_cheetah.orchestration.peer import PeerInfo
+from tiny_cheetah.orchestration.server import PeerServer, ServerProfile
+from tiny_cheetah.orchestration.model_client import ModelClient
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PeerManager:
     """Coordinates hosting, discovery, and remote connections."""
-
     def __init__(self) -> None:
-        self.identity = generate_identity(username=f"cheetah-{uuid.uuid4().hex[:6]}")
-        self._peers: Dict[str, PeerInfo] = {}
-        self._listeners: List[Callable[[], None]] = []
+        self.peer_id = os.getenv("TC_PEER_ID") or f"cheetah-{uuid.uuid4().hex[:6]}"
+        self.address = "0.0.0.0"
+        self.port = int(os.getenv("TC_PORT", "8765"))
+        self.peer_info = PeerInfo(peer_id=self.peer_id, address=self.address, port=self.port, peer_type="self")
+        self.peers: Dict[str, PeerInfo] = {self.peer_id: self.peer_info}
         self._lock = threading.RLock()
         self._host_lock = threading.Condition(self._lock)
         self._host_busy = False
         self._server: Optional[PeerServer] = None
         self._access_password: str = ""
-        self._discovery = DiscoveryService(
-            self.identity["username"],
-            self.identity["fingerprint"],
-        )
-        self._discovery.start(self._on_discovered_peer)
+        self._server_targets = self._parse_server_env()
         self._host_info = collect_host_info()
         self._gpu_info = self._detect_gpus()
-
         self.server_profile = ServerProfile()
 
-    # Listener hooks -------------------------------------------------
-    def add_listener(self, callback: Callable[[], None]) -> None:
-        self._listeners.append(callback)
-
-    def _notify(self) -> None:
-        for callback in list(self._listeners):
+    # Peer Discovery -----------------------------------------------------------
+    def discover_peers(self) -> None:
+        with self._lock:
+            self.peers.setdefault(self.peer_id, self.peer_info)
+        for host, port in self._server_targets:
             try:
-                callback()
-            except Exception:
+                info = self._ping_peer(host, port)
+            except Exception as exc:
+                logger.debug("Server %s:%s unreachable: %s", host, port, exc)
                 continue
-
+            peer_id = info.get("peer_id") or f"{host}:{port}"
+            if peer_id == self.peer_id:
+                continue
+            ping_ms = float(info.get("rtt_ms", 0.0))
+            with self._lock:
+                self.peers[peer_id] = PeerInfo(
+                    peer_id=peer_id,
+                    address=host,
+                    port=port,
+                    devices=[],
+                    ping_ms=ping_ms,
+                    metadata={"server": "1"},
+                    device_report={},
+                    peer_type="server",
+                )
+        if self._server is not None:
+            for hosted in self._server.get_connected_peers():
+                if hosted.peer_id == self.peer_id:
+                    continue
+                self.peers[hosted.peer_id] = hosted
+        
     # Hosting ------------------------------------------------------------------
-    def start_hosting(self, host: str = "0.0.0.0", port: int = 8765, password: str = "") -> None:
+    def start_hosting(self, password: str = "") -> None:
         if self._server is not None:
             return
         self._access_password = password.strip()
-        self._server = PeerServer((host, port), self._identity_payload(), self._tensor_callback, self._access_password)
+        self.server_profile.server_id = self.peer_id
+        self.server_profile.address = (self.address, self.port)
+        self._server = PeerServer(
+            (self.address, self.port),
+            self.server_profile,
+            self._host_info,
+            self._local_devices(),
+            self._tensor_callback,
+            self._access_password,
+        )
         self._server.start()
-        self._notify()
+        
 
     def stop_hosting(self) -> None:
         if self._server is not None:
             self._server.stop()
             self._server = None
         with self._lock:
-            self._peers.clear()
-        self._notify()
+            self.peers = {self.peer_id: self.peer_info}
+        
 
     # Connections ---------------------------------------------------------------
-    def connect_to_peer(self, address: str, port: int, devices: Optional[List[str]] = None, password: str = "") -> PeerInfo:
-        start = time.time()
-        client = PeerClient(address, port, self.identity, password=password)
-        identity = client.handshake()
-        ping_ms = max((time.time() - start) * 1000.0, 0.0)
-        offer = identity.get("offer", {})
-        hardware = identity.get("hardware", {})
+    def list_peers(self, include_self: bool = False) -> List[PeerInfo]:
         with self._lock:
-            peer = PeerInfo(
-                node_id=identity.get("fingerprint", uuid.uuid4().hex),
-                username=identity.get("username", "unknown"),
-                pgp_key=identity.get("pgp_public", ""),
-                address=address,
-                port=port,
-                devices=devices or identity.get("devices", []),
-                flops_gflops=float(offer.get("flops_gflops", 0.0)),
-                gpu_description=offer.get("gpu_description", ""),
-                ping_ms=ping_ms or float(offer.get("ping_ms", 0.0)),
-                offer_description=offer.get("description", ""),
-                motd=offer.get("motd", ""),
-                device_report=hardware,
-            )
-            if password:
-                peer.metadata["password"] = password
-            self._peers[peer.node_id] = peer
-        self._notify()
-        return peer
-
-    def disconnect_peer(self, node_id: str) -> None:
-        with self._lock:
-            self._peers.pop(node_id, None)
-        self._notify()
-
-    def list_peers(self) -> List[PeerInfo]:
-        with self._lock:
-            return list(self._peers.values())
+            if include_self:
+                return list(self.peers.values())
+            return [p for pid, p in self.peers.items() if pid != self.peer_id]
 
     def peer_count(self) -> int:
+        """Return total known nodes (includes self)."""
         with self._lock:
-            return len(self._peers) + (1 if self._server else 0)
+            return len(self.peers)
+
+    def hosted_clients(self) -> List[PeerInfo]:
+        if self._server is None:
+            return []
+        return self._server.get_connected_peers()
 
     def aggregate_devices(self) -> List[str]:
         devices: List[str] = []
         with self._lock:
-            if self._server is not None:
-                devices.append("local-host")
-            for peer in self._peers.values():
+            for pid, peer in self.peers.items():
+                if pid == self.peer_id and self._server is not None:
+                    devices.append("local-host")
                 devices.extend(peer.devices)
         return devices
 
@@ -134,6 +135,10 @@ class PeerManager:
     def get_host_info(self) -> dict:
         """Return CPU/RAM/GPU/TC_DEVICE info for this host."""
         return dict(self._host_info)
+
+    def is_hosting(self) -> bool:
+        with self._lock:
+            return self._server is not None
     
     def update_server_profile(
         self,
@@ -149,22 +154,39 @@ class PeerManager:
         self.server_profile.gpu_description = gpu_description
         self.server_profile.ping_ms = ping_ms
         self.server_profile.motd = motd
-        if self._server is not None:
-            self._server.identity = self._identity_payload()
-        self._notify()
+        
+
+    def connect_to_peer(self, host: str, port: int, password: str = "") -> PeerInfo:
+        """Explicitly connect to a server/peer and record it."""
+        info = self._ping_peer(host, port)
+        peer_id = info.get("peer_id") or f"{host}:{port}"
+        peers_on_server = self._list_peers(host, port)
+        ping_ms = float(info.get("rtt_ms", 0.0))
+        peer = PeerInfo(
+            peer_id=peer_id,
+            address=host,
+            port=port,
+            devices=[],
+            ping_ms=ping_ms,
+            metadata={"password": password, "peers": peers_on_server},
+            peer_type="server",
+        )
+        with self._lock:
+            self.peers[peer_id] = peer
+        return peer
 
     def request_remote_compute(self, node_id: str, payload: dict) -> dict:
-        peer = self._peers.get(node_id)
+        peer = self.peers.get(node_id)
         if peer is None:
             raise RuntimeError("Unknown peer")
-        password = peer.metadata.get("password", "")
-        client = PeerClient(peer.address, peer.port, self.identity, password=password)
+        client = ModelClient(peer, password=peer.metadata.get("password", ""))
         return client.dispatch_tensor(payload)
 
     def schedule_tensor(self, payload: dict, prefer_peer_id: Optional[str] = None) -> dict:
         """Route a tensor job to an available peer, otherwise serialize on the local host."""
         with self._lock:
-            target = prefer_peer_id if prefer_peer_id in self._peers else next(iter(self._peers), None)
+            candidates = [pid for pid in self.peers if pid != self.peer_id]
+            target = prefer_peer_id if prefer_peer_id in candidates else (candidates[0] if candidates else None)
         if target:
             try:
                 return self.request_remote_compute(target, payload)
@@ -180,19 +202,6 @@ class PeerManager:
             with self._host_lock:
                 self._host_busy = False
                 self._host_lock.notify_all()
-
-    def _identity_payload(self) -> dict:
-        payload = dict(self.identity)
-        payload["offer"] = {
-            "description": self.server_profile.description,
-            "flops_gflops": self.server_profile.flops_gflops,
-            "gpu_description": self.server_profile.gpu_description,
-            "ping_ms": self.server_profile.ping_ms,
-            "motd": self.server_profile.motd,
-        }
-        payload["devices"] = self._local_devices()
-        payload["hardware"] = self._host_info
-        return payload
 
     def access_password_required(self) -> bool:
         return bool(self._access_password)
@@ -218,27 +227,6 @@ class PeerManager:
             gpus.append({"name": "CPU-only", "total_mem_gb": 0, "compute": "N/A"})
         return gpus
 
-    # Discovery -----------------------------------------------------------------
-    def _on_discovered_peer(self, info: dict) -> None:
-        address = info.get("address")
-        if not address:
-            return
-        fingerprint = info.get("fingerprint")
-        if fingerprint in self._peers:
-            return
-        peer = PeerInfo(
-            node_id=fingerprint,
-            username=info.get("username", "lan-peer"),
-            pgp_key="",
-            address=address,
-            port=info.get("port", 8765),
-            devices=["LAN CPU"],
-            metadata={"discovered": "1"},
-        )
-        with self._lock:
-            self._peers.setdefault(peer.node_id, peer)
-        self._notify()
-
     # Misc ----------------------------------------------------------------------
     def _tensor_callback(self, payload: dict) -> dict:
         # Placeholder for actual tensor execution. schedule_tensor handles locking.
@@ -246,6 +234,54 @@ class PeerManager:
             "echo": payload,
             "notice": "Remote execution not implemented in this build.",
         }
+
+    # Utilities -----------------------------------------------------------------
+    def _parse_server_env(self) -> List[Tuple[str, int]]:
+        raw = os.getenv("TC_SERVER", "").strip()
+        if not raw:
+            return []
+        targets: List[Tuple[str, int]] = []
+        for item in raw.split(","):
+            part = item.strip()
+            if not part:
+                continue
+            if ":" in part:
+                host, port_text = part.split(":", 1)
+                try:
+                    targets.append((host, int(port_text)))
+                except ValueError:
+                    continue
+            else:
+                targets.append((part, self.port))
+        return targets
+
+    def _ping_peer(self, host: str, port: int) -> dict:
+        payload = json.dumps({"command": "ping"}).encode("utf-8")
+        start = time.time()
+        with socket.create_connection((host, port), timeout=3) as sock:
+            sock.sendall(payload)
+            sock.shutdown(socket.SHUT_WR)
+            response = sock.recv(4096)
+        rtt_ms = max((time.time() - start) * 1000.0, 0.0)
+        try:
+            data = json.loads(response.decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Invalid ping response from {host}:{port}: {exc}")
+        data["rtt_ms"] = rtt_ms
+        return data
+
+    def _list_peers(self, host: str, port: int) -> list:
+        payload = json.dumps({"command": "list_peers"}).encode("utf-8")
+        with socket.create_connection((host, port), timeout=3) as sock:
+            sock.sendall(payload)
+            sock.shutdown(socket.SHUT_WR)
+            response = sock.recv(8192)
+        try:
+            data = json.loads(response.decode("utf-8"))
+            return data.get("peers", [])
+        except Exception as exc:
+            logger.debug("list_peers failed from %s:%s: %s", host, port, exc)
+            return []
 
 
 _MANAGER: Optional[PeerManager] = None

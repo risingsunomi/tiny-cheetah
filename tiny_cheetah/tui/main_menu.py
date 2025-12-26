@@ -8,10 +8,12 @@ from textual.containers import Container, Center
 from .chat_menu import ChatScreen
 from .train_menu import TrainScreen
 from .orchestration_screen import OrchestrationScreen
+from tiny_cheetah.orchestration import get_peer_manager
 
 
 class MainMenu(App):
     CSS_PATH = Path(__file__).with_name("main_menu.tcss")
+    BINDINGS = [("escape", "pop_screen", "Back")]
 
     def __init__(
         self,
@@ -45,7 +47,12 @@ class MainMenu(App):
         self.title="[tiny-cheetah] v0.1"
         if self.offline_mode:
             self.title += " [offline]"
-        self.sub_title="Active Nodes 1"
+        self._peer_manager = get_peer_manager()
+        self._update_subtitle()
+        self.set_interval(2.0, self._update_subtitle)
+    
+    def action_pop_screen(self):
+        exit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -66,3 +73,7 @@ class MainMenu(App):
 
     def set_training_defaults(self, settings: Optional[dict]) -> None:
         self.training_defaults = settings or {}
+
+    def _update_subtitle(self) -> None:
+        count = self._peer_manager.peer_count()
+        self.sub_title = f"Active Nodes {count}"

@@ -47,9 +47,9 @@ from textual.widgets import (
     LoadingIndicator
 )
 
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from tiny_cheetah.logging_utils import get_logger
+
+logger = get_logger(__name__)
 MAX_RESTORED_MESSAGES = 20
 
 class ChatModelSelected(Message):
@@ -142,6 +142,8 @@ class ChatScreen(Screen[None]):
         if self._model_label is not None:
             self._model_label.update(self._model_id or "<select>")
         await self._initialize_chat_logs()
+        await asyncio.to_thread(self._discover_peers)
+        self.set_interval(1.0, self._discover_peers)
 
     def action_open_model_picker(self) -> None:
         self._open_model_picker()
@@ -175,9 +177,6 @@ class ChatScreen(Screen[None]):
             self.action_toggle_loading()
             await self._start_model_load()
             self.action_toggle_loading()
-        elif event.button.id == "chat-back":
-            self._clear_model(persist=False)
-            self.app.pop_screen()
         elif event.button.id == "clear-model":
             self._clear_model(persist=True)
         elif event.button.id == "new-chat-log":
@@ -217,6 +216,13 @@ class ChatScreen(Screen[None]):
         """Allow Esc/b bindings to exit the chat screen cleanly."""
         self._clear_model(persist=False)
         self.app.pop_screen()
+
+    def _discover_peers(self) -> None:
+        if self.app is None:
+            return
+        self._peer_manager.discover_peers()
+        count = self._peer_manager.peer_count()
+        self.app.sub_title = f"Active Nodes {count}"
 
     
     async def on_input_submitted(self, event: Input.Submitted) -> None:

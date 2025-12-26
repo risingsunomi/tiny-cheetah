@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -41,11 +42,13 @@ class PeerDirectoryScreen(Screen[None]):
                     yield self._connect_button
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         if self._peer_table is not None:
             self._peer_table.add_columns("", "Name", "CPU/RAM", "GPU", "Ping")
         self._refresh_peers()
         self.set_interval(3.0, self._refresh_peers)
+        await asyncio.to_thread(self._discover_peers)
+        self.set_interval(1.0, self._discover_peers)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table is not self._peer_table:
@@ -61,7 +64,7 @@ class PeerDirectoryScreen(Screen[None]):
             return
         if event.button.id == "peer-connect" and self._selected_peer:
             # Disconnect if already connected, otherwise instruct to connect via network screen.
-            if self._selected_peer in {p.node_id for p in self._manager.list_peers()}:
+            if self._selected_peer in {p.peer_id for p in self._manager.list_peers()}:
                 self._manager.disconnect_peer(self._selected_peer)
                 self._selected_peer = None
                 self._refresh_peers()
@@ -79,9 +82,9 @@ class PeerDirectoryScreen(Screen[None]):
         self._peer_table.clear()
         peers = self._manager.list_peers()
         for peer in peers:
-            row_key = f"peer-{peer.node_id}"
+            row_key = f"peer-{peer.peer_id}"
             self._peer_table.add_row(*self._peer_row(peer), key=row_key)
-            if selected == peer.node_id:
+            if selected == peer.peer_id:
                 try:
                     self._peer_table.cursor_coordinate = (row_key, 0)  # type: ignore[arg-type]
                 except Exception:
@@ -95,28 +98,30 @@ class PeerDirectoryScreen(Screen[None]):
         if not self._selected_peer:
             self._detail_panel.update("Select a peer to view details.")
             return
-        peer = next((p for p in self._manager.list_peers() if p.node_id == self._selected_peer), None)
+        peer = next((p for p in self._manager.list_peers() if p.peer_id == self._selected_peer), None)
         if peer is None:
             self._detail_panel.update("Peer unavailable.")
             return
-        desc = peer.offer_description or "General compute"
-        rate_line = f"GFLOPS: {peer.flops_gflops:.1f}" if getattr(peer, "flops_gflops", 0) else "GFLOPS: unspecified"
-        motd = peer.motd or "No welcome message provided."
         hw = peer.device_report or {}
         cpu = hw.get("cpu_count", "--")
         ram = hw.get("ram_gb", "--")
-        tc = hw.get("tc_device", "")
         gpus = hw.get("gpus", []) or []
         gpu_line = ", ".join(g.get("name", "GPU") for g in gpus) if gpus else "No GPUs reported"
-        text = (
-            f"[bold]{peer.username}[/]\n"
-            f"Devices: {', '.join(peer.devices) or 'unknown'}\n"
-            f"Offer: {desc}\n"
-            f"{rate_line}\n"
-            f"MOTD: {motd}\n"
-            f"CPU cores: {cpu} | RAM: {ram} GB | TC_DEVICE: {tc or 'n/a'}\n"
-            f"GPUs: {gpu_line}"
-        )
+        peers_on_server = peer.metadata.get("peers", []) if isinstance(peer.metadata, dict) else []
+        if peers_on_server:
+            peer_lines = "\n".join(f"- {p.get('peer_id', 'peer')}" for p in peers_on_server)
+            text = (
+                f"[bold]{peer.peer_id}[/] (server)\n"
+                f"Connected peers:\n{peer_lines}\n"
+                f"Hardware: CPUs {cpu} | RAM {ram} GB | GPUs: {gpu_line}"
+            )
+        else:
+            text = (
+                f"[bold]{peer.peer_id}[/]\n"
+                f"Devices: {', '.join(peer.devices) or 'unknown'}\n"
+                f"Hardware: CPUs {cpu} | RAM {ram} GB\n"
+                f"GPUs: {gpu_line}"
+            )
         self._detail_panel.update(text)
         self._update_connect_label()
 
@@ -129,7 +134,7 @@ class PeerDirectoryScreen(Screen[None]):
         gpu_list = hw.get("gpus", []) or []
         gpu = gpu_list[0].get("name", peer.gpu_description or "GPU") if gpu_list else (peer.gpu_description or "GPU")
         cpu_ram = f"{cpu}c/{ram}GB"
-        return [lock, peer.username, cpu_ram, gpu, ping]
+        return [lock, peer.peer_id, cpu_ram, gpu, ping]
 
     def _set_detail(self, message: str) -> None:
         if self._detail_panel is not None:
@@ -138,9 +143,16 @@ class PeerDirectoryScreen(Screen[None]):
     def _update_connect_label(self) -> None:
         if self._connect_button is None:
             return
-        if self._selected_peer and self._selected_peer in {p.node_id for p in self._manager.list_peers()}:
+        if self._selected_peer and self._selected_peer in {p.peer_id for p in self._manager.list_peers()}:
             self._connect_button.label = "Disconnect"
             self._connect_button.variant = "warning"
         else:
             self._connect_button.label = "Connect"
             self._connect_button.variant = "primary"
+
+    def _discover_peers(self) -> None:
+        if self.app is None:
+            return
+        self._manager.discover_peers()
+        count = self._manager.peer_count()
+        self.app.sub_title = f"Active Nodes {count}"

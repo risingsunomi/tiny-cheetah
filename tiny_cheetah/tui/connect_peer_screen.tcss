@@ -1,7 +1,3 @@
-Screen {
-    background: $surface;
-}
-
 #connect-root {
     layout: vertical;
     padding: 2;
