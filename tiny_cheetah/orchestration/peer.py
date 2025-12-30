@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Any
 
 
 @dataclass
@@ -18,6 +18,7 @@ class PeerInfo:
     metadata: Dict[str, str] = field(default_factory=dict)
     device_report: Dict[str, object] = field(default_factory=dict)
     peer_type: str = "local"  # e.g., "local", "server"
+    shard: Any = None
 
     @property
     def as_dict(self) -> dict:
@@ -33,4 +34,5 @@ class PeerInfo:
             "latency_ms": self.latency_ms,
             "metadata": self.metadata,
             "device_report": self.device_report,
+            "shard": self.shard,
         }

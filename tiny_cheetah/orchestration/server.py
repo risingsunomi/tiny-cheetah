@@ -5,6 +5,8 @@ import json
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple, Dict
+from collections import deque
+import socket
 
 from tiny_cheetah.orchestration.peer import PeerInfo
 from tiny_cheetah.logging_utils import get_logger
@@ -43,10 +45,12 @@ class PeerServer:
         self.tensor_callback = tensor_callback
         self.access_password = access_password
         self._connected_peers: Dict[str, PeerInfo] = {}
+        self._caller_queue: deque[dict] = deque(maxlen=100)
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Optional[asyncio.AbstractServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._udp_transport: Optional[asyncio.DatagramTransport] = None
 
     # ------------------------------------------------------------------ server
     def start(self) -> None:
@@ -64,6 +68,8 @@ class PeerServer:
             if self._server is not None:
                 self._server.close()
                 await self._server.wait_closed()
+            if self._udp_transport is not None:
+                self._udp_transport.close()
             tasks = asyncio.all_tasks(self._loop)
             for task in tasks:
                 task.cancel()
@@ -101,28 +107,59 @@ class PeerServer:
         command = message.get("command")
         response: dict
         if command == "ping":
-            response = {"status": "pong"}
+            response = {"status": "pong", "server_id": self.server_profile.server_id}
+        elif command == "tensor_forward":
+            payload = message.get("payload", {}) or {}
+            next_index = payload.get("next_index")
+            ring = payload.get("ring", [])
+            if next_index is None or not isinstance(ring, list):
+                response = {"error": "invalid forward request"}
+            elif next_index < len(ring):
+                target = ring[next_index]
+                host = target.get("address")
+                port = target.get("port")
+                if host and port:
+                    try:
+                        data = json.dumps(
+                            {
+                                "command": "tensor_forward",
+                                "payload": {**payload, "next_index": next_index + 1},
+                            }
+                        ).encode("utf-8")
+                        with socket.create_connection((host, int(port)), timeout=5) as sock:
+                            sock.sendall(data)
+                        response = {"status": "forwarded", "peer_id": target.get("peer_id", "")}
+                    except Exception as exc:
+                        response = {"error": str(exc)}
+                else:
+                    response = {"error": "missing address/port"}
+            else:
+                response = {"status": "complete"}
         elif command == "list_peers":
             response = {
                 "status": "ok",
-                "peer_id": self.server_profile.server_id,
+                "server_id": self.server_profile.server_id,
                 "peers": [
                     {
                         "peer_id": p.peer_id,
                         "devices": p.devices,
                         "hardware": p.device_report,
+                        "address": p.address,
+                        "port": p.port,
                     }
                     for p in self._connected_peers.values()
                 ],
             }
-        elif command == "tensor_payload":
-            payload = message.get("payload", {})
-            try:
-                result = self.tensor_callback(payload)
-                response = {"status": "ok", "result": result}
-            except Exception as exc:
-                logger.warning("Tensor callback failed: %s", exc)
-                response = {"error": str(exc)}
+        elif command == "return_tensor":
+            if len(self._caller_queue) >= self._caller_queue.maxlen:  # type: ignore[arg-type]
+                response = {"error": "server busy"}
+            else:
+                entry = {
+                    "caller_id": message.get("caller_id") or message.get("peer_id") or f"{peer[0]}:{peer[1]}",
+                    "payload": message.get("payload", {}),
+                }
+                self._caller_queue.append(entry)
+                response = {"status": "ok"}
         else:
             response = {"error": f"unknown command {command!r}"}
 
@@ -136,8 +173,8 @@ class PeerServer:
             remote_id = message.get("peer_id") or f"{peer[0]}:{peer[1]}"
             self._connected_peers[remote_id] = PeerInfo(
                 peer_id=remote_id,
-                address="hidden",
-                port=0,
+                address=peer[0],
+                port=peer[1],
                 devices=message.get("devices", []),
                 device_report=message.get("hardware", {}),
                 metadata={"last_seen": "ping" if command == "ping" else command},
@@ -147,12 +184,47 @@ class PeerServer:
     def get_connected_peers(self) -> list[PeerInfo]:
         return list(self._connected_peers.values())
 
+
+class _UDPProbeResponder(asyncio.DatagramProtocol):
+    def __init__(self, server_id: str, hardware: dict) -> None:
+        super().__init__()
+        self.server_id = server_id
+        self.hardware = hardware
+        self.transport: Optional[asyncio.DatagramTransport] = None
+
+    def datagram_received(self, data: bytes, addr) -> None:  # type: ignore[override]
+        try:
+            msg = json.loads(data.decode("utf-8"))
+        except Exception:
+            return
+        if msg.get("command") != "ping":
+            return
+        response = json.dumps(
+            {
+                "server_id": self.server_id,
+                "hardware": self.hardware,
+            }
+        ).encode("utf-8")
+        if self.transport is not None:
+            try:
+                self.transport.sendto(response, addr)
+            except Exception:
+                return
+
     # ----------------------------------------------------------------- internals
     def _run_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         coro = asyncio.start_server(self._handle_client, *self.address)
         self._server = self._loop.run_until_complete(coro)
+        udp_coro = self._loop.create_datagram_endpoint(
+            lambda: _UDPProbeResponder(self.server_profile.server_id, self.hardware),
+            local_addr=("0.0.0.0", self.address[1]),
+        )
+        try:
+            self._udp_transport, _ = self._loop.run_until_complete(udp_coro)
+        except Exception:
+            self._udp_transport = None
         try:
             self._loop.run_forever()
         finally:

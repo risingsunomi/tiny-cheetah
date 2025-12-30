@@ -11,7 +11,7 @@ import transformers as hf_transformers
 import tinygrad as tg
 
 from tiny_cheetah.models.llm.model import Model
-from tiny_cheetah.models.llm.shard import Shard
+from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.repos import RepoHuggingFace
 
 

@@ -19,7 +19,7 @@ from tiny_cheetah.models.llm.helpers import load_safetensors
 from tiny_cheetah.tui.helpers import streaming_generate
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.models.llm.model_config import ModelConfig
-from tiny_cheetah.models.llm.shard import Shard
+from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.repos import RepoCustom
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
@@ -27,8 +27,6 @@ from tiny_cheetah.orchestration import get_peer_manager
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 
 from textual.app import ComposeResult
-from textual import work
-from textual.binding import Binding
 from textual.containers import Container
 from textual.events import Mount
 from textual.message import Message
@@ -151,7 +149,6 @@ class ChatScreen(Screen[None]):
     def action_open_orchestration(self) -> None:
         self.app.push_screen(OrchestrationScreen())
 
-    @work(thread=True)
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "open-model-picker":
             self._open_model_picker()

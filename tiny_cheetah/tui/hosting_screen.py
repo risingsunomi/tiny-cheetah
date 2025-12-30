@@ -107,7 +107,7 @@ class HostingScreen(Screen[None]):
         except ValueError:
             flops = self._manager.server_profile.flops_gflops
         try:
-            ping = float(self._ping_input.value.strip())
+            ping = float(self._manager.server_profile.ping_ms or 0.0)
         except ValueError:
             ping = self._manager.server_profile.ping_ms
         self._manager.update_server_profile(
@@ -131,7 +131,7 @@ class HostingScreen(Screen[None]):
     def _discover_peers(self) -> None:
         if self.app is None:
             return
-        self._peer_manager.discover_peers()
+        self._manager.discover_peers()
         count = self._manager.peer_count()
         self.app.sub_title = f"Active Nodes {count}"
 

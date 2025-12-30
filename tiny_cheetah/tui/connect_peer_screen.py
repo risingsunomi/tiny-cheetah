@@ -28,7 +28,7 @@ class ConnectPeerScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="connect-root"):
-            yield Label("Connect to Remote Peer", id="connect-title")
+            yield Label("Connect to Server", id="connect-title")
             yield self._host_input
             yield self._port_input
             yield self._password

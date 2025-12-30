@@ -26,7 +26,7 @@ class OrchestrationScreen(Screen[None]):
         ("b", "pop_screen", "Back"),
         ("r", "refresh_panels", "Refresh data"),
         ("h", "open_hosting", "Manage server"),
-        ("n", "open_connect", "Connect to peer"),
+        ("n", "open_connect", "Connect to server"),
         ("p", "open_peers", "Peer directory"),
     ]
 
@@ -128,46 +128,66 @@ class OrchestrationScreen(Screen[None]):
         )
 
     def _network_map_text(self) -> str:
-        peers = self._manager.list_peers()
-        if not peers:
+        peers = self._manager.list_peers(include_self=True)
+        if len(peers) <= 1:
             return "\n".join(
                 [
-                    "[b]Network / Peer Map[/]",
-                    "No peers connected.",
-                    "Press n to connect or p to open peer directory.",
+                    "[b]Peer Ring[/]",
+                    "No remote peers in the ring.",
+                    "Press n to connect to a server or p to open peer directory.",
                 ]
             )
-        lines = ["[b]Network / Peer Map[/]", "This Device"]
-        for index, peer in enumerate(peers):
-            connector = "└──" if index == len(peers) - 1 else "├──"
-            status = "[green]●[/]" if peer.available else "[red]●[/]"
+
+        def _status(peer) -> str:
+            return "[green]●[/]" if peer.available else "[red]●[/]"
+
+        ring_lines = ["[b]Peer Ring[/]"]
+        ring_lines.append("Order:")
+        ordered = [p for p in peers if p.peer_id != self._manager.peer_id]
+        ordered.insert(0, self._manager.peer_info)  # self first in ring
+
+        for idx, peer in enumerate(ordered):
             ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
             hw = peer.device_report or {}
             gpu_list = hw.get("gpus", [])
             gpu_name = gpu_list[0].get("name", peer.gpu_description or "GPU") if gpu_list else (peer.gpu_description or "GPU")
-            flops = getattr(peer, "flops_gflops", 0) or hw.get("flops_gflops", "")
-            try:
-                flops_val = float(flops)
-                flops_text = f"{flops_val:.1f} GFLOPS" if flops_val else ""
-            except Exception:
-                flops_text = ""
-            hw_summary = f"{gpu_name}"
-            if flops_text:
-                hw_summary += f" / {flops_text}"
-            line = f"{connector} {status} {peer.peer_id} [{hw_summary}] ({ping})"
-            lines.append(line)
-        return "\n".join(lines)
+            shard_obj = getattr(peer, "shard", None)
+            shard = {}
+            if shard_obj:
+                shard = {
+                    "start_layer": getattr(shard_obj, "start_layer", 0),
+                    "end_layer": getattr(shard_obj, "end_layer", 0),
+                }
+            shard_span = ""
+            if shard:
+                shard_span = f" L{shard.get('start_layer', 0)}-{shard.get('end_layer', 0)}"
+            line = f"{idx+1:>2}) {_status(peer)} {peer.peer_id} [{gpu_name}] ({ping}){shard_span}"
+            ring_lines.append(line)
+
+        # visual wrap indicator
+        if len(ordered) > 1:
+            ring_lines.append(" └─ wrap → back to 1")
+        return "\n".join(ring_lines)
 
     def _host_map_text(self) -> str:
-        peers = self._manager.list_peers()
-        lines = ["[b]Host Map[/]"]
-        online = self._manager.is_hosting() or bool(peers)
+        peers = self._manager.list_peers(include_self=True)
+        lines = ["[b]Capacity Tree[/]"]
+        online = self._manager.is_hosting() or len(peers) > 1
         local_status = "[green]■[/]" if online else "[red]■[/]"
         lines.append(f"{local_status} {self._manager.peer_id}")
         for peer in peers:
+            if peer.peer_id == self._manager.peer_id:
+                continue
             status = "[green]■[/]" if peer.available else "[red]■[/]"
-            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
-            lines.append(f" ├─ {status} {peer.peer_id} ({ping})")
+            hw = peer.device_report or {}
+            gpus = hw.get("gpus", []) or []
+            gpu = gpus[0].get("name", peer.gpu_description or "GPU") if gpus else (peer.gpu_description or "GPU")
+            ram = hw.get("ram_gb", "--")
+            shard_obj = getattr(peer, "shard", None)
+            shard_span = ""
+            if shard_obj:
+                shard_span = f" | L{getattr(shard_obj,'start_layer',0)}-{getattr(shard_obj,'end_layer',0)}"
+            lines.append(f" ├─ {status} {peer.peer_id} [{gpu}, {ram}GB]{shard_span}")
         if len(lines) == 2:
             lines.append(" └─ No peers connected")
         return "\n".join(lines)
