@@ -6,6 +6,8 @@ from typing import Any
 import tinygrad as tg
 from transformers import AutoTokenizer
 
+from textual.widgets import RichLog
+
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.models.llm.helpers import sample
 
@@ -21,7 +23,7 @@ def streaming_generate(
     top_p: float = 0.8,
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,
-    verbose: bool = False,
+    verbose: bool = False
 ) -> tuple[list[int], float]:
     device = input_ids.device
     input_ids = input_ids.to(device)

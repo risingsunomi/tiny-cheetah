@@ -5,17 +5,20 @@ import socket
 import base64
 import asyncio
 from typing import Any, Dict, List, Sequence
+from pathlib import Path
 
-import numpy as np
-try:
-    from tinygrad import Tensor
-except Exception:  # pragma: no cover - optional import
-    Tensor = None  # type: ignore
+import tinygrad as tg
+
+from transformers import AutoTokenizer
 
 from tiny_cheetah.models.shard import Shard
 
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.orchestration.server import ServerProfile
+from tiny_cheetah.models.llm.helpers import (
+    load_model,
+    sample
+)
 
 logger = get_logger(__name__)
 
@@ -23,8 +26,19 @@ logger = get_logger(__name__)
 class ModelClient:
     """Handles tensor RPCs and simple shard planning based on RAM/VRAM."""
 
-    def __init__(self, server: ServerProfile) -> None:
+    def __init__(
+        self,
+        server: ServerProfile,
+        shard: Shard | None = None,
+        peer_id: str | None = None,
+        node_index: int = 0,
+        ring: Sequence[Any] = (),
+    ) -> None:
         self.server = server
+        self.shard = shard or Shard("local", 0, 0, 0)
+        self.peer_id = peer_id or server.server_id
+        self.node_index = node_index
+        self.ring = ring
 
     def dispatch_tensor(self, payload: dict) -> Dict[str, Any]:
         """Send a tensor payload to the remote peer for execution."""
@@ -62,45 +76,71 @@ class ModelClient:
     def ping(self) -> Dict[str, Any]:
         return self._send({"command": "ping"})
 
-    # ------------------------------------------------------------------ compute
-    def compute_resp(
+    def compute_resp_bytes(
         self,
         shard: Shard,
         tensor_bytes: bytes,
-        ring: List[Dict[str, Any]],
-        index: int,
+        ring: Sequence[Any],
+        node_index: int,
     ) -> Dict[str, Any]:
-        """
-        Run a tinygrad operation over the provided tensor bytes for the given shard.
-        This is a minimal placeholder that applies tanh to the incoming tensor slice
-        and forwards or returns the result based on the provided ring.
-        """
-        if shard is None:
-            return {"error": "missing shard", "peer_id": self.server.server_id}
-        if Tensor is None:
-            return {"error": "tinygrad not available", "peer_id": self.server.server_id}
+        encoded = base64.b64encode(tensor_bytes or b"").decode("ascii") if tensor_bytes else ""
+        resp: Dict[str, Any] = {
+            "peer_id": self.server.server_id,
+            "from_peer_id": self.peer_id,
+            "shard": shard.__dict__ if hasattr(shard, "__dict__") else {"model_name": getattr(shard, "model_name", "model")},
+            "tensor": encoded,
+        }
+        # No direct peer-to-peer routing; rely on the server to coordinate.
+        resp["ring"] = list(ring)
+        resp["node_index"] = node_index
+        return resp
+
+    # ------------------------------------------------------------------ compute
+    async def compute_resp(
+        self,
+        input_ids: tg.Tensor,
+        attention_mask: tg.Tensor,
+        temp: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.8,
+        alpha_f: float = 0.0,
+        alpha_p: float = 0.0
+    ) -> Dict[str, Any]:
         try:
-            arr = np.frombuffer(tensor_bytes, dtype=np.float32)
-            t = Tensor(arr)
-            out = t.tanh()
-            out_np = out.numpy().astype(np.float32)
-            out_bytes = out_np.tobytes()
+            # load model shard
+            sanitized = self.shard.model_name.replace("/", "__")
+            cache_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
+            candidate_path = Path(self.shard.model_name).expanduser()
+            model, model_config, tokenizer, model_path = await load_model(
+                self.shard.model_name,
+                self.shard,
+                self.input_ids.device
+            )
+
+            # generate output tensor
+            device = input_ids.device
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+
+            out_tokens: list[int] = []
+            curr_pos = attention_mask.shape[1]
+
+            position_ids = ((attention_mask.cumsum(axis=1) - 1) * attention_mask).to(device)
+            logits = model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
+            next_logit = logits[:, -1, :].flatten()
+            tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+            out_tokens.append(tok)
+            out_bytes = tg.Tensor(out_tokens, device="CPU").numpy().tobytes()
+
             compute_resp = {
                 "peer_id": self.server.server_id,
-                "ring_index": index,
-                "shard": {
-                    "model_name": shard.model_name,
-                    "start_layer": shard.start_layer,
-                    "end_layer": shard.end_layer,
-                    "total_layers": shard.total_layers,
-                },
-                "tensor": base64.b64encode(out_bytes).decode("ascii"),
-                "ring": ring,
+                "from_peer_id": self.peer_id,
+                "tensor": base64.b64encode(out_bytes).decode("ascii")
             }
             # Server will orchestrate forwarding; send to server (ring[0])
-            if not ring:
+            if not self.ring:
                 return compute_resp
-            next_index = index + 1 if index + 1 < len(ring) else 0
+            next_index = self.node_index + 1 if self.node_index + 1 < len(self.ring) else 0
             host, port = self.server.address
             if host and port:
                 try:
@@ -154,18 +194,27 @@ class ModelClient:
         capacities = []
         for peer in peers:
             hw = peer.device_report or {}
-            gpus = hw.get("gpus", []) or []
+            devices = hw.get("devices", []) or hw.get("gpus", []) or []
+            gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
             vram = 0.0
-            if gpus and isinstance(gpus[0], dict):
+            if gpu_entry:
                 try:
-                    vram = float(gpus[0].get("total_mem_gb", 0.0))
+                    vram = float(gpu_entry.get("ram_gb", gpu_entry.get("total_mem_gb", 0.0)) or 0.0)
                 except Exception:
                     vram = 0.0
             ram = 0.0
-            try:
-                ram = float(hw.get("ram_gb", 0.0))
-            except Exception:
-                ram = 0.0
+            if isinstance(hw, dict):
+                try:
+                    ram = float(hw.get("ram_gb", 0.0))
+                except Exception:
+                    ram = 0.0
+            if ram == 0.0 and isinstance(devices, list):
+                cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), None)
+                if cpu_entry:
+                    try:
+                        ram = float(cpu_entry.get("ram_gb", 0.0))
+                    except Exception:
+                        ram = 0.0
             flops = getattr(peer, "flops_gflops", 0.0) if hasattr(peer, "flops_gflops") else 0.0
             capacity = max(vram, ram, flops, 1.0)
             capacities.append((peer, capacity))

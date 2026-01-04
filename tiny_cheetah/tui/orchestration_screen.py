@@ -57,9 +57,7 @@ class OrchestrationScreen(Screen[None]):
 
     async def on_mount(self) -> None:
         await asyncio.to_thread(self._discover_peers)
-        self.set_interval(1.0, self._discover_peers)
-        self.set_interval(2.0, self._refresh_panels)
-        self._refresh_panels()
+        self.set_interval(5.0, self._discover_peers)
 
     # Textual actions ---------------------------------------------------------
     def action_refresh_panels(self) -> None:
@@ -94,18 +92,22 @@ class OrchestrationScreen(Screen[None]):
             return
         self._manager.discover_peers()
         count = self._manager.peer_count()
-        self.app.sub_title = f"Host Dashboard · Active Nodes {count}"
+        current = getattr(self.app, "sub_title", "")
+        new_title = f"Host Dashboard · Active Nodes {count}"
+        if new_title != current:
+            self.app.sub_title = new_title
 
     def _local_node_text(self) -> str:
         profile = self._manager.server_profile
         host_info = self._manager.get_host_info()
         online = self._manager.is_hosting() or bool(self._manager.list_peers())
         status = "[green]● Online[/]" if online else "[red]● Offline[/]"
-        cpu = host_info.get("cpu_count", "--")
-        ram = host_info.get("ram_gb", "--")
-        tc = host_info.get("tc_device", "")
-        gpus = host_info.get("gpus", []) or []
-        gpu_line = ", ".join(g.get("name", "GPU") for g in gpus) if gpus else "No GPUs"
+        devices = host_info.get("devices", []) or []
+        cpu_entry = next((d for d in devices if d.get("device") == "CPU"), {})
+        gpu_entries = [d for d in devices if d.get("device") == "GPU"]
+        cpu_cores = cpu_entry.get("cores", "--")
+        ram = cpu_entry.get("ram_gb", "--")
+        gpu_line = ", ".join(d.get("name", "GPU") for d in gpu_entries) if gpu_entries else "No GPUs"
         config_line = f"GPU: {profile.gpu_description or gpu_line} | Ping: {profile.ping_ms or '--'} ms"
         return "\n".join(
             [
@@ -116,10 +118,9 @@ class OrchestrationScreen(Screen[None]):
                 f"- Status: {status}",
                 "",
                 "Hardware:",
-                f"- CPU cores: {cpu}",
+                f"- CPU cores: {cpu_cores}",
                 f"- RAM: {ram} GB",
                 f"- GPUs: {gpu_line}",
-                f"- TC_DEVICE: {tc or 'not set'}",
                 "",
                 "Config:",
                 f"- {config_line}",
@@ -149,8 +150,9 @@ class OrchestrationScreen(Screen[None]):
         for idx, peer in enumerate(ordered):
             ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
             hw = peer.device_report or {}
-            gpu_list = hw.get("gpus", [])
-            gpu_name = gpu_list[0].get("name", peer.gpu_description or "GPU") if gpu_list else (peer.gpu_description or "GPU")
+            devices = hw.get("devices", []) or hw.get("gpus", [])
+            gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
+            gpu_name = gpu_entry.get("name", peer.gpu_description or "GPU") if gpu_entry else (peer.gpu_description or "GPU")
             shard_obj = getattr(peer, "shard", None)
             shard = {}
             if shard_obj:
@@ -180,9 +182,11 @@ class OrchestrationScreen(Screen[None]):
                 continue
             status = "[green]■[/]" if peer.available else "[red]■[/]"
             hw = peer.device_report or {}
-            gpus = hw.get("gpus", []) or []
-            gpu = gpus[0].get("name", peer.gpu_description or "GPU") if gpus else (peer.gpu_description or "GPU")
-            ram = hw.get("ram_gb", "--")
+            devices = hw.get("devices", []) or hw.get("gpus", []) or []
+            gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
+            cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), None)
+            gpu = gpu_entry.get("name", peer.gpu_description or "GPU") if gpu_entry else (peer.gpu_description or "GPU")
+            ram = cpu_entry.get("ram_gb", "--") if cpu_entry else hw.get("ram_gb", "--")
             shard_obj = getattr(peer, "shard", None)
             shard_span = ""
             if shard_obj:

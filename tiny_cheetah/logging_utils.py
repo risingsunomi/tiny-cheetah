@@ -27,9 +27,7 @@ def configure_logging() -> Path:
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     root = logging.getLogger()
     root.addHandler(handler)
-    # Keep console verbosity as-is; ensure file captures info and above.
-    if root.level == logging.NOTSET or root.level > logging.INFO:
-        root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
     _configured = True
     return _log_file
 

@@ -8,6 +8,7 @@ from textual.containers import Container, Center
 from .chat_menu import ChatScreen
 from .train_menu import TrainScreen
 from .orchestration_screen import OrchestrationScreen
+from .settings_screen import SettingsScreen
 from tiny_cheetah.orchestration import get_peer_manager
 
 
@@ -41,6 +42,7 @@ class MainMenu(App):
             yield Button("Chat", id="chat-btn")
             yield Button("Train", id="train-btn")
             yield Button("Network", id="network-btn")
+            yield Button("Settings", id="settings-btn")
             yield Button("Quit", id="quit-btn")
 
     def on_mount(self) -> None:
@@ -68,6 +70,8 @@ class MainMenu(App):
             self.push_screen(screen)
         elif button_id == "network-btn":
             self.push_screen(OrchestrationScreen())
+        elif button_id == "settings-btn":
+            self.push_screen(SettingsScreen())
         elif button_id == "quit-btn":
             self.exit()
 

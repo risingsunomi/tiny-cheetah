@@ -103,9 +103,11 @@ class PeerDirectoryScreen(Screen[None]):
             self._detail_panel.update("Peer unavailable.")
             return
         hw = peer.device_report or {}
-        cpu = hw.get("cpu_count", "--")
-        ram = hw.get("ram_gb", "--")
-        gpus = hw.get("gpus", []) or []
+        devices = hw.get("devices", []) or hw.get("gpus", []) or []
+        cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), {})
+        cpu = cpu_entry.get("cores", "--")
+        ram = cpu_entry.get("ram_gb", "--")
+        gpus = [d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"]
         gpu_line = ", ".join(g.get("name", "GPU") for g in gpus) if gpus else "No GPUs reported"
         peers_on_server = peer.metadata.get("peers", []) if isinstance(peer.metadata, dict) else []
         if peers_on_server:
@@ -129,10 +131,12 @@ class PeerDirectoryScreen(Screen[None]):
         lock = "🔒" if peer.metadata.get("password") else ""
         ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
         hw = peer.device_report or {}
-        cpu = hw.get("cpu_count", "--")
-        ram = hw.get("ram_gb", "--")
-        gpu_list = hw.get("gpus", []) or []
-        gpu = gpu_list[0].get("name", peer.gpu_description or "GPU") if gpu_list else (peer.gpu_description or "GPU")
+        devices = hw.get("devices", []) or hw.get("gpus", []) or []
+        cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), {})
+        cpu = cpu_entry.get("cores", "--")
+        ram = cpu_entry.get("ram_gb", "--")
+        gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
+        gpu = gpu_entry.get("name", peer.gpu_description or "GPU") if gpu_entry else (peer.gpu_description or "GPU")
         cpu_ram = f"{cpu}c/{ram}GB"
         return [lock, peer.peer_id, cpu_ram, gpu, ping]
 

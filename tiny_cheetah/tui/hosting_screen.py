@@ -25,8 +25,10 @@ class HostingScreen(Screen[None]):
         profile = self._manager.server_profile
         host_info = self._manager.get_host_info()
         default_gpu = ""
-        if host_info.get("gpus"):
-            default_gpu = str(host_info["gpus"][0].get("name", ""))
+        devices = host_info.get("devices", []) or []
+        first_gpu = next((d for d in devices if d.get("device") == "GPU"), None)
+        if first_gpu:
+            default_gpu = str(first_gpu.get("name", ""))
         self._desc_input = Input(value=profile.description, placeholder="Server description", id="host-desc")
         self._flops_input = Input(value=f"{profile.flops_gflops}", placeholder="GFLOPS", id="host-flops")
         self._gpu_input = Input(value=profile.gpu_description or default_gpu, placeholder="GPU description", id="host-gpu")
@@ -75,7 +77,9 @@ class HostingScreen(Screen[None]):
         if event.button.id == "hosting-start":
             self._start_hosting()
         elif event.button.id == "hosting-stop":
-            self._manager.stop_hosting()
+            self._manager.server_manager.stop_hosting()
+            self._manager.connected_server = None
+            self._manager.peers = {self._manager.peer_id: self._manager.peer_info}
             self._set_status("Hosting stopped.")
             self._append_log("Stopped hosting server.")
         elif event.button.id == "hosting-save":
@@ -93,7 +97,14 @@ class HostingScreen(Screen[None]):
             self._append_log("Invalid port specified; hosting not started.")
             return
         try:
-            self._manager.start_hosting(host, port, password=self._password_input.value)
+            self._manager.server_manager.start_hosting(
+                host,
+                port,
+                password=self._password_input.value,
+                tensor_callback=self._manager._tensor_callback,
+            )
+            self._manager.connected_server = self._manager.server_manager.server_profile
+            self._manager._ensure_server_peer(self._manager.peer_id, host, port)
         except Exception as exc:  # pragma: no cover - defensive
             self._set_status(f"Failed to host: {exc}")
             self._append_log(f"Failed to start hosting on {host}:{port}: {exc}")
@@ -139,5 +150,6 @@ class HostingScreen(Screen[None]):
         info = self._manager.get_gpu_inventory()
         lines = ["Name                Memory(GB)  Compute"]
         for gpu in info:
-            lines.append(f"{gpu.get('name','')[:16]:<18} {gpu.get('total_mem_gb',0):>5}      {gpu.get('compute','')}")
+            mem = gpu.get("ram_gb", gpu.get("total_mem_gb", 0))
+            lines.append(f"{gpu.get('name','')[:16]:<18} {mem:>5}      {gpu.get('compute','')}")
         return Label("\\n".join(lines), id="hosting-gpu-table")

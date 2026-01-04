@@ -104,10 +104,24 @@ class PeerServer:
             await writer.wait_closed()
             return
 
+        profile_meta = {
+            "description": self.server_profile.description,
+            "flops_gflops": self.server_profile.flops_gflops,
+            "gpu_description": self.server_profile.gpu_description,
+            "motd": self.server_profile.motd,
+            "password": bool(self.access_password),
+        }
+
         command = message.get("command")
         response: dict
         if command == "ping":
-            response = {"status": "pong", "server_id": self.server_profile.server_id}
+            response = {
+                "status": "pong",
+                "server_id": self.server_profile.server_id,
+                "hardware": self.hardware,
+                "devices": self.devices,
+                **profile_meta,
+            }
         elif command == "tensor_forward":
             payload = message.get("payload", {}) or {}
             next_index = payload.get("next_index")
@@ -139,6 +153,9 @@ class PeerServer:
             response = {
                 "status": "ok",
                 "server_id": self.server_profile.server_id,
+                "hardware": self.hardware,
+                "devices": self.devices,
+                **profile_meta,
                 "peers": [
                     {
                         "peer_id": p.peer_id,
@@ -181,6 +198,25 @@ class PeerServer:
                 peer_type="client",
             )
 
+    def _run_loop(self) -> None:
+        """Event loop runner for the TCP server and UDP probe responder."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        coro = asyncio.start_server(self._handle_client, *self.address)
+        self._server = self._loop.run_until_complete(coro)
+        udp_coro = self._loop.create_datagram_endpoint(
+            lambda: _UDPProbeResponder(self.server_profile.server_id, self.hardware),
+            local_addr=("0.0.0.0", self.address[1]),
+        )
+        try:
+            self._udp_transport, _ = self._loop.run_until_complete(udp_coro)
+        except Exception:
+            self._udp_transport = None
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+
     def get_connected_peers(self) -> list[PeerInfo]:
         return list(self._connected_peers.values())
 
@@ -210,22 +246,3 @@ class _UDPProbeResponder(asyncio.DatagramProtocol):
                 self.transport.sendto(response, addr)
             except Exception:
                 return
-
-    # ----------------------------------------------------------------- internals
-    def _run_loop(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        coro = asyncio.start_server(self._handle_client, *self.address)
-        self._server = self._loop.run_until_complete(coro)
-        udp_coro = self._loop.create_datagram_endpoint(
-            lambda: _UDPProbeResponder(self.server_profile.server_id, self.hardware),
-            local_addr=("0.0.0.0", self.address[1]),
-        )
-        try:
-            self._udp_transport, _ = self._loop.run_until_complete(udp_coro)
-        except Exception:
-            self._udp_transport = None
-        try:
-            self._loop.run_forever()
-        finally:
-            self._loop.close()

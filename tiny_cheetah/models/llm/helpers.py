@@ -2,17 +2,21 @@
 Helpers for LLM models.
 """
 from pathlib import Path
-from typing import Optional, Any
+from typing import Dict, Optional, Any
 import json
 import os, time
 
 import safetensors
-import transformers as hf_transformers
 import tinygrad as tg
+from transformers import AutoTokenizer
 
 from tiny_cheetah.models.llm.model import Model
+from tiny_cheetah.models.llm.model_config import ModelConfig
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.repos import RepoHuggingFace
+from tiny_cheetah.logging_utils import get_logger
+from tiny_cheetah.repos import RepoCustom
+
+logger = get_logger(__name__)
 
 
 # From https://github.com/tinygrad/tinygrad/blob/master/extra/models/llama.py#L204C3-L205C138
@@ -298,3 +302,69 @@ def generate(
             print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s (no EOS)")
 
     return out_tokens
+
+# async model load
+def load_model_config(model_path: Path) -> Dict[str, Any]:
+    model_config = ModelConfig()
+    model_config_file = model_path / "config.json"
+    if not model_config_file.exists():
+        logger.error("Model config file not found at %s", model_config_file)
+        raise FileNotFoundError(f"Model config file not found at {model_config_file}")
+    
+    model_config.load(model_config_file)
+    gen_config = model_path / "generation_config.json"
+    if gen_config.exists():
+        model_config.load_generation_config(gen_config)
+    
+    return model_config.config
+
+async def load_model(
+    model_id: str,
+    shard: Shard = None,
+    weight_device: str = os.getenv("TC_DEVICE") or "CPU",
+    offline_mode: bool = False
+) -> tuple[Model, dict, AutoTokenizer, Path]:
+    sanitized = model_id.replace("/", "__")
+    cache_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
+    candidate_path = Path(model_id).expanduser()
+
+    if candidate_path.exists():
+        resolved_path = candidate_path
+    elif cache_path.exists():
+        resolved_path = cache_path
+    
+    local_model = False
+    if resolved_path is not None and any(resolved_path.glob("*.*")):
+        local_model = True
+        model_config = load_model_config(resolved_path)
+        model_path = resolved_path
+    elif offline_mode:
+        logger.error("Model %s not found in offline mode", model_id)
+        raise FileNotFoundError(f"Model {model_id} not found in offline mode")
+
+    if not local_model:
+        repo = RepoCustom(model_id)
+        model_path, model_config, _ = await repo.download()
+
+    if shard is None:
+        shard = Shard(
+            model_name=model_id,
+            start_layer=0,
+            end_layer=model_config["num_layers"],
+            total_layers=model_config["num_layers"]+1
+        )
+
+    model = Model(model_config, shard)
+    load_safetensors(
+        model,
+        model_path,
+        model_config,
+        weight_device=weight_device,
+        use_tied=model_config["tie_word_embeddings"]
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_path),
+        local_files_only=offline_mode
+    )
+
+    return model, model_config, tokenizer, model_path
