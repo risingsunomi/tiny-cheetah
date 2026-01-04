@@ -238,7 +238,7 @@ class ChatScreen(Screen[None]):
 
             self._generating_resp = True
             self.action_toggle_loading()
-            await self.refresh()
+            self.refresh()
             self._generate_response()
             self.action_toggle_loading()
             self._generating_resp = False

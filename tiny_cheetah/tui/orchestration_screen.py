@@ -14,6 +14,7 @@ from tiny_cheetah.orchestration import get_peer_manager
 from tiny_cheetah.tui.connect_peer_screen import ConnectPeerScreen
 from tiny_cheetah.tui.hosting_screen import HostingScreen
 from tiny_cheetah.tui.peer_directory_screen import PeerDirectoryScreen
+from tiny_cheetah.tui.server_directory_screen import ServerDirectoryScreen
 
 
 class OrchestrationScreen(Screen[None]):
@@ -28,6 +29,7 @@ class OrchestrationScreen(Screen[None]):
         ("h", "open_hosting", "Manage server"),
         ("n", "open_connect", "Connect to server"),
         ("p", "open_peers", "Peer directory"),
+        ("s", "open_servers", "Server directory"),
     ]
 
     def __init__(self) -> None:
@@ -71,6 +73,9 @@ class OrchestrationScreen(Screen[None]):
 
     def action_open_peers(self) -> None:
         self.app.push_screen(PeerDirectoryScreen())
+
+    def action_open_servers(self) -> None:
+        self.app.push_screen(ServerDirectoryScreen())
     
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
