@@ -232,6 +232,21 @@ class PeerClient:
         except Exception:
             pass
 
+    def _populate_peer_from_hw(self, peer_info: CDevice, host_info: dict) -> None:
+        devices = host_info.get("devices", [])
+        cpu_info = next((d for d in devices if d.get("device") == "CPU"), {})
+        gpu_info = next((d for d in devices if d.get("device") == "GPU"), {})
+        peer_info.cpu_make = ""
+        peer_info.cpu_model = str(cpu_info.get("name", ""))
+        peer_info.cpu_proc_speed = ""
+        peer_info.cpu_cores = int(cpu_info.get("cores", 0) or 0)
+        peer_info.cpu_ram = str(cpu_info.get("ram_gb", ""))
+        peer_info.gpu_make = ""
+        peer_info.gpu_model = str(gpu_info.get("name", ""))
+        peer_info.gpu_vram = str(gpu_info.get("ram_gb", ""))
+        peer_info.gpu_flops = float(gpu_info.get("flops", 0.0) or 0.0)
+
+
 _PEER_CLIENT: Optional[PeerClient] = None
 
 
