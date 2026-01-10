@@ -9,8 +9,8 @@ from textual.containers import Container
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, Static, DataTable
 
-from tiny_cheetah.orchestration import get_peer_manager
-from tiny_cheetah.orchestration.peer import PeerInfo
+from tiny_cheetah.orchestration import get_peer_client
+from tiny_cheetah.orchestration.cdevice import CDevice
 
 
 class PeerDirectoryScreen(Screen[None]):
@@ -19,7 +19,7 @@ class PeerDirectoryScreen(Screen[None]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._manager = get_peer_manager()
+        self._manager = get_peer_client()
         self._peer_table: Optional[DataTable] = None
         self._detail_panel: Optional[Static] = None
         self._selected_peer: Optional[str] = None
@@ -64,7 +64,7 @@ class PeerDirectoryScreen(Screen[None]):
             return
         if event.button.id == "peer-connect" and self._selected_peer:
             # Disconnect if already connected, otherwise instruct to connect via network screen.
-            if self._selected_peer in {p.peer_id for p in self._manager.list_peers()}:
+            if self._selected_peer in {p.peer_client_id for p in self._manager.list_peers()}:
                 self._manager.disconnect_peer(self._selected_peer)
                 self._selected_peer = None
                 self._refresh_peers()
@@ -82,9 +82,9 @@ class PeerDirectoryScreen(Screen[None]):
         self._peer_table.clear()
         peers = self._manager.list_peers()
         for peer in peers:
-            row_key = f"peer-{peer.peer_id}"
+            row_key = f"peer-{peer.peer_client_id}"
             self._peer_table.add_row(*self._peer_row(peer), key=row_key)
-            if selected == peer.peer_id:
+            if selected == peer.peer_client_id:
                 try:
                     self._peer_table.cursor_coordinate = (row_key, 0)  # type: ignore[arg-type]
                 except Exception:
@@ -98,28 +98,28 @@ class PeerDirectoryScreen(Screen[None]):
         if not self._selected_peer:
             self._detail_panel.update("Select a peer to view details.")
             return
-        peer = next((p for p in self._manager.list_peers() if p.peer_id == self._selected_peer), None)
+        peer = next((p for p in self._manager.list_peers() if p.peer_client_id == self._selected_peer), None)
         if peer is None:
             self._detail_panel.update("Peer unavailable.")
             return
         hw = peer.device_report or {}
         devices = hw.get("devices", []) or hw.get("gpus", []) or []
-        cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), {})
+        cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("kind") == "CPU"), {})
         cpu = cpu_entry.get("cores", "--")
         ram = cpu_entry.get("ram_gb", "--")
-        gpus = [d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"]
+        gpus = [d for d in devices if isinstance(d, dict) and d.get("kind") == "GPU"]
         gpu_line = ", ".join(g.get("name", "GPU") for g in gpus) if gpus else "No GPUs reported"
         peers_on_server = peer.metadata.get("peers", []) if isinstance(peer.metadata, dict) else []
         if peers_on_server:
-            peer_lines = "\n".join(f"- {p.get('peer_id', 'peer')}" for p in peers_on_server)
+            peer_lines = "\n".join(f"- {p.get('peer_client_id', 'peer')}" for p in peers_on_server)
             text = (
-                f"[bold]{peer.peer_id}[/] (server)\n"
+                f"[bold]{peer.peer_client_id}[/] (server)\n"
                 f"Connected peers:\n{peer_lines}\n"
                 f"Hardware: CPUs {cpu} | RAM {ram} GB | GPUs: {gpu_line}"
             )
         else:
             text = (
-                f"[bold]{peer.peer_id}[/]\n"
+                f"[bold]{peer.peer_client_id}[/]\n"
                 f"Devices: {', '.join(peer.devices) or 'unknown'}\n"
                 f"Hardware: CPUs {cpu} | RAM {ram} GB\n"
                 f"GPUs: {gpu_line}"
@@ -127,18 +127,18 @@ class PeerDirectoryScreen(Screen[None]):
         self._detail_panel.update(text)
         self._update_connect_label()
 
-    def _peer_row(self, peer: PeerInfo) -> list[str]:
+    def _peer_row(self, peer: CDevice) -> list[str]:
         lock = "🔒" if peer.metadata.get("password") else ""
         ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
         hw = peer.device_report or {}
         devices = hw.get("devices", []) or hw.get("gpus", []) or []
-        cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), {})
+        cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("kind") == "CPU"), {})
         cpu = cpu_entry.get("cores", "--")
         ram = cpu_entry.get("ram_gb", "--")
-        gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
+        gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("kind") == "GPU"), None)
         gpu = gpu_entry.get("name", peer.gpu_description or "GPU") if gpu_entry else (peer.gpu_description or "GPU")
         cpu_ram = f"{cpu}c/{ram}GB"
-        return [lock, peer.peer_id, cpu_ram, gpu, ping]
+        return [lock, peer.peer_client_id, cpu_ram, gpu, ping]
 
     def _set_detail(self, message: str) -> None:
         if self._detail_panel is not None:
@@ -147,7 +147,7 @@ class PeerDirectoryScreen(Screen[None]):
     def _update_connect_label(self) -> None:
         if self._connect_button is None:
             return
-        if self._selected_peer and self._selected_peer in {p.peer_id for p in self._manager.list_peers()}:
+        if self._selected_peer and self._selected_peer in {p.peer_client_id for p in self._manager.list_peers()}:
             self._connect_button.label = "Disconnect"
             self._connect_button.variant = "warning"
         else:

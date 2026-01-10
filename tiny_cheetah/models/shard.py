@@ -17,3 +17,11 @@ class Shard:
 
     def __str__(self):
         return f"Shard(model_name={self.model_name}, start_layer={self.start_layer}, end_layer={self.end_layer}, total_layers={self.total_layers})"
+
+    def to_dict(self):
+        return {
+            "model_name": self.model_name,
+            "start_layer": self.start_layer,
+            "end_layer": self.end_layer,
+            "total_layers": self.total_layers
+        }

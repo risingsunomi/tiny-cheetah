@@ -8,8 +8,8 @@ from textual.containers import Container
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Static
 
-from tiny_cheetah.orchestration import get_peer_manager
-from tiny_cheetah.orchestration.peer import PeerInfo
+from tiny_cheetah.orchestration import get_peer_client
+from tiny_cheetah.orchestration.cdevice import CDevice
 
 
 class ConnectPeerScreen(Screen[None]):
@@ -18,26 +18,24 @@ class ConnectPeerScreen(Screen[None]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._manager = get_peer_manager()
+        self._manager = get_peer_client()
         self._host_input = Input(placeholder="host", id="connect-host")
         self._port_input = Input(placeholder="port", id="connect-port")
-        self._password = Input(placeholder="password (if required)", password=True, id="connect-pass")
         self._status: Label | None = None
         self._host_info: Static | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="connect-root"):
-            yield Label("Connect to Server", id="connect-title")
+            yield Label("Add Peer (IP:port)", id="connect-title")
             yield self._host_input
             yield self._port_input
-            yield self._password
             with Container(id="connect-actions"):
-                yield Button("Connect", id="connect-btn", variant="primary")
+                yield Button("Add", id="connect-btn", variant="primary")
             status = Label("", id="connect-status")
             self._status = status
             yield status
-            info = Static("Host MOTD and terms will appear here after connecting.", id="connect-info")
+            info = Static("Peer info will appear here after connecting.", id="connect-info")
             self._host_info = info
             yield info
         yield Footer()
@@ -62,27 +60,22 @@ class ConnectPeerScreen(Screen[None]):
             self._set_status("Invalid port.")
             return
         try:
-            peer = self._manager.connect_to_peer(host, port, password=self._password.value)
+            peer = self._manager.add_peer(host, port)
         except Exception as exc:
             self._set_status(str(exc))
             return
-        self._set_status(f"Connected to {peer.peer_id}")
+        self._set_status(f"Added {peer.peer_client_id}")
         self._show_host_info(peer)
 
     def _set_status(self, message: str) -> None:
         if self._status is not None:
             self._status.update(message)
 
-    def _show_host_info(self, peer: PeerInfo) -> None:
-        motd = peer.metadata.get("motd", "No welcome message provided.") if hasattr(peer, "metadata") else "No welcome message provided."
-        flops = f"{peer.flops_gflops:.1f} GFLOPS" if getattr(peer, "flops_gflops", 0) else "unspecified"
-        policy = f"Compute: {flops}"
+    def _show_host_info(self, peer: CDevice) -> None:
         lines = [
-            f"Host: [bold]{peer.peer_id}[/]",
+            f"Peer: [bold]{peer.peer_client_id}[/]",
             f"Devices: {', '.join(peer.devices) or 'unknown'}",
-            policy,
         ]
-        lines.append(f"MOTD: {motd}")
         if self._host_info is not None:
             self._host_info.update("\n".join(lines))
 

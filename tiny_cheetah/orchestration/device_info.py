@@ -80,7 +80,7 @@ def _gpus() -> List[Dict[str, object]]:
                     continue
                 if "chipset model" in lower and in_graphics:
                     name = line.split(":", 1)[1].strip()
-                    current = {"name": name, "total_mem_gb": 0.0, "compute": "Metal"}
+                    current = {"name": name, "total_mem_gb": 0.0, "device": "METAL"}
                     continue
                 if in_graphics and "memory" in lower and current:
                     mem_gb = _parse_mac_mem_gb(line)
@@ -101,16 +101,48 @@ def _gpus() -> List[Dict[str, object]]:
                 gpus.append(current)
         except Exception as exc:
             logger.debug("system_profiler GPU probe failed: %s", exc)
-            gpus.append({"name": "Apple GPU", "total_mem_gb": 0.0, "compute": "Metal"})
+            gpus.append({"name": "Apple GPU", "total_mem_gb": 0.0, "device": "METAL"})
 
-    # Normalize ram/compute fields for consumers.
+    # Normalize ram/device fields for consumers.
     for gpu in gpus:
+        if "vendor" not in gpu:
+            gpu["vendor"] = _guess_vendor(str(gpu.get("name", "")))
         if "ram_gb" not in gpu:
             gpu["ram_gb"] = gpu.get("total_mem_gb", 0.0)
-        if "compute" not in gpu:
-            gpu["compute"] = ""
+        if "vram_gb" not in gpu:
+            gpu["vram_gb"] = gpu.get("total_mem_gb", gpu.get("ram_gb", 0.0))
+        if "device" not in gpu:
+            gpu["device"] = _vendor_device(str(gpu.get("vendor", "")))
+        if "flops" not in gpu:
+            gpu["flops"] = 0.0
 
     return gpus
+
+
+def _guess_vendor(name: str) -> str:
+    lower = name.lower()
+    if "nvidia" in lower or "geforce" in lower or "quadro" in lower or "tesla" in lower:
+        return "NVIDIA"
+    if "amd" in lower or "radeon" in lower or "rx " in lower:
+        return "AMD"
+    if "intel" in lower:
+        return "Intel"
+    if "apple" in lower:
+        return "Apple"
+    return ""
+
+
+def _vendor_device(vendor: str) -> str:
+    lower = vendor.lower()
+    if "nvidia" in lower:
+        return "CUDA"
+    if "amd" in lower:
+        return "AMD"
+    if "intel" in lower:
+        return "CPU"
+    if "apple" in lower:
+        return "METAL"
+    return ""
 
 
 def _cuda_gpus() -> List[Dict[str, object]]:
@@ -139,7 +171,7 @@ def _cuda_gpus() -> List[Dict[str, object]]:
                     mem_gb = round(mem_gb / 1024.0, 2)
             except Exception:
                 mem_gb = 0.0
-        gpus.append({"name": name, "total_mem_gb": mem_gb, "compute": "CUDA"})
+        gpus.append({"name": name, "total_mem_gb": mem_gb, "device": "CUDA"})
     return gpus
 
 
@@ -159,7 +191,7 @@ def _rocm_gpus() -> List[Dict[str, object]]:
         lower = line.lower()
         if lower.startswith("gpu"):
             if current:
-                current.setdefault("compute", "ROCm")
+                current.setdefault("device", "AMD")
                 gpus.append(current)
             current = {}
             continue
@@ -177,7 +209,7 @@ def _rocm_gpus() -> List[Dict[str, object]]:
             except Exception:
                 continue
     if current:
-        current.setdefault("compute", "ROCm")
+        current.setdefault("device", "AMD")
         gpus.append(current)
     return gpus
 
@@ -278,12 +310,67 @@ def _cpu_name() -> str:
 
 def _cpu_device() -> Dict[str, object]:
     return {
+        "kind": "CPU",
         "device": "CPU",
         "name": _cpu_name(),
+        "vendor": _cpu_vendor(),
+        "speed": _cpu_speed(),
         "cores": _cpu_count(),
         "ram_gb": _ram_gb(),
-        "compute": "CPU",
     }
+
+
+def _cpu_vendor() -> str:
+    system = platform.system()
+    if system == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if "vendor_id" in line.lower():
+                        return line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+    elif system == "Darwin":
+        try:
+            out = subprocess.check_output(
+                ["/usr/sbin/sysctl", "-n", "machdep.cpu.vendor"], text=True, timeout=2
+            )
+            if out.strip():
+                return out.strip()
+        except Exception:
+            pass
+    elif system == "Windows":
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-Command", "(Get-CimInstance Win32_Processor).Manufacturer | Select-Object -First 1"],
+                text=True,
+                timeout=2,
+            )
+            if out.strip():
+                return out.strip()
+        except Exception:
+            try:
+                out = subprocess.check_output(["wmic", "cpu", "get", "Manufacturer"], text=True, timeout=2)
+                for line in out.splitlines():
+                    line = line.strip()
+                    if line and line.lower() != "manufacturer":
+                        return line
+            except Exception:
+                pass
+    return ""
+
+
+def _cpu_speed() -> str:
+    if psutil is not None:
+        try:
+            freq = psutil.cpu_freq()
+            if freq and freq.max:
+                return f"{freq.max / 1000.0:.2f}GHz"
+            if freq and freq.current:
+                return f"{freq.current / 1000.0:.2f}GHz"
+        except Exception:
+            pass
+    return ""
 
 
 def collect_host_info() -> Dict[str, object]:
@@ -292,10 +379,13 @@ def collect_host_info() -> Dict[str, object]:
     devices: List[Dict[str, object]] = [cpu]
     devices.extend(
         {
-            "device": "GPU",
+            "kind": "GPU",
+            "device": gpu.get("device", ""),
             "name": gpu.get("name", "GPU"),
+            "vendor": gpu.get("vendor", ""),
             "ram_gb": gpu.get("total_mem_gb", 0.0),
-            "compute": gpu.get("compute", ""),
+            "vram_gb": gpu.get("vram_gb", gpu.get("total_mem_gb", 0.0)),
+            "flops": gpu.get("flops", 0.0),
         }
         for gpu in gpus
     )

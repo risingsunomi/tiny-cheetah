@@ -9,7 +9,7 @@ from .chat_menu import ChatScreen
 from .train_menu import TrainScreen
 from .orchestration_screen import OrchestrationScreen
 from .settings_screen import SettingsScreen
-from tiny_cheetah.orchestration import get_peer_manager
+from tiny_cheetah.orchestration import get_peer_client
 
 
 class MainMenu(App):
@@ -49,7 +49,7 @@ class MainMenu(App):
         self.title="[tiny-cheetah] v0.1"
         if self.offline_mode:
             self.title += " [offline]"
-        self._peer_manager = get_peer_manager()
+        self._peer_manager = get_peer_client()
         self._update_subtitle()
         self.set_interval(2.0, self._update_subtitle)
     

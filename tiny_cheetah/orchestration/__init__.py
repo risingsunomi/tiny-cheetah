@@ -1,3 +1,3 @@
-from .peer_manager import PeerManager, get_peer_manager
+from .peer_client import PeerClient, get_peer_client
 
-__all__ = ["PeerManager", "get_peer_manager"]
+__all__ = ["PeerClient", "get_peer_client"]

@@ -21,7 +21,7 @@ from tiny_cheetah.tui.helpers import streaming_generate
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
-from tiny_cheetah.orchestration import get_peer_manager
+from tiny_cheetah.orchestration import get_peer_client
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 
 from textual import worker
@@ -86,7 +86,7 @@ class ChatScreen(Screen[None]):
         self._chat_log_list: Optional[ListView] = None
         self._log_storage = ChatLogStorage()
         self._current_log_id: Optional[int] = None
-        self._peer_manager = get_peer_manager()
+        self._peer_manager = get_peer_client()
         self._peer_label: Optional[Label] = None
 
     def compose(self) -> ComposeResult:

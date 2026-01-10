@@ -65,8 +65,8 @@ class SettingsScreen(Screen[None]):
         selected_any = False
         for idx, device in enumerate(devices):
             name = str(device.get("name", f"device-{idx}"))
-            kind = str(device.get("device", "device")).upper()
-            compute = str(device.get("compute", kind)).upper() or kind
+            kind = str(device.get("kind", "device")).upper()
+            compute = str(device.get("device", kind)).upper() or kind
             ram = device.get("ram_gb", "")
             label = f"{kind}: {name}"
             if ram not in ("", None):

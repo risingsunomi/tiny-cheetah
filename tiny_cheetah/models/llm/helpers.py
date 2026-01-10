@@ -328,23 +328,23 @@ async def load_model(
     cache_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
     candidate_path = Path(model_id).expanduser()
 
+    resolved_path = None
     if candidate_path.exists():
         resolved_path = candidate_path
     elif cache_path.exists():
         resolved_path = cache_path
     
-    local_model = False
+    model_repo = RepoCustom(model_id)
     if resolved_path is not None and any(resolved_path.glob("*.*")):
-        local_model = True
         model_config = load_model_config(resolved_path)
         model_path = resolved_path
+    elif resolved_path is None and not offline_mode:
+        logger.info("No path resolved to model %s, creating a new path %s and downloading model", model_id, cache_path)
+        model_path = cache_path
+        model_path, model_config, _ = await model_repo.download()
     elif offline_mode:
         logger.error("Model %s not found in offline mode", model_id)
         raise FileNotFoundError(f"Model {model_id} not found in offline mode")
-
-    if not local_model:
-        repo = RepoCustom(model_id)
-        model_path, model_config, _ = await repo.download()
 
     if shard is None:
         shard = Shard(

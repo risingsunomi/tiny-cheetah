@@ -17,7 +17,7 @@ from textual.app import ComposeResult
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
-from tiny_cheetah.orchestration import get_peer_manager
+from tiny_cheetah.orchestration import get_peer_client
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 from rich.markup import escape
 
@@ -183,7 +183,7 @@ class TrainScreen(Screen[None]):
         self._path_summary_label: Optional[Label] = None
         self._auto_training_runs = 1
         self._stopped_by_user = False
-        self._peer_manager = get_peer_manager()
+        self._peer_manager = get_peer_client()
         self._peer_label: Optional[Label] = None
         self._sync_base_node_name()
 
