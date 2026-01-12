@@ -8,7 +8,7 @@ import os
 import tinygrad as tg
 from tiny_cheetah.orchestration.peer_client import PeerClient
 
-TEST_HOST = "0.0.0.0"
+TEST_RECIVER_HOST = "0.0.0.0"
 TEST_PORT = 6668
 TEST_TIMEOUT = 30.0
 TEST_TENSOR_PAYLOAD = tg.Tensor.randn(10, 10).numpy().tobytes()
@@ -22,8 +22,11 @@ def _stop_peer_client(client: PeerClient) -> None:
 
 class TestPeerClientSender(unittest.TestCase):
     def test_peer_client_sender(self):
-        host = TEST_HOST
+        host = os.getenv("TEST_TARGET_HOST", None)
+        if host is None:
+            self.skipTest("TEST_TARGET_HOST not set")
         port = TEST_PORT
+        
         client = None
         try:
             client = PeerClient()
@@ -36,9 +39,7 @@ class TestPeerClientSender(unittest.TestCase):
 
 class TestPeerClientReceiver(unittest.IsolatedAsyncioTestCase):
     async def test_peer_client_receiver(self):
-        host = os.getenv("TEST_TARGET_HOST", None)
-        if host is None:
-            self.skipTest("TEST_TARGET_HOST not set")
+        host = TEST_RECIVER_HOST
         port = TEST_PORT
         timeout = TEST_TIMEOUT
         expected = TEST_TENSOR_PAYLOAD
