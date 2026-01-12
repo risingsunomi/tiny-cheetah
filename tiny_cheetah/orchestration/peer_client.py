@@ -24,16 +24,13 @@ class PeerClient:
         self.peer_client_id = os.getenv("TC_PEER_ID") or f"cheetah-{uuid.uuid4().hex[:6]}"
         self.address = "0.0.0.0"
         self.port = int(os.getenv("TC_PORT", "8765"))
-        local_shard = Shard("local", 0, 0, 0)
         self.peer_info = CDevice(
             self.peer_client_id,
             self.address,
             self.port,
-            local_shard,
-            in_use=True,
-            tg_device=os.getenv("TC_DEVICE", "CPU"),
-            load_host_info=True,
+            os.getenv("TC_DEVICE", "CPU")
         )
+        self.in_use = False
         self.peers: Dict[str, CDevice] = {self.peer_client_id: self.peer_info}
         self._lock = threading.RLock()
         self._udp_thread: Optional[threading.Thread] = None
@@ -41,21 +38,38 @@ class PeerClient:
         self._start_udp_responder()
 
     # Networking ---------------------------------------------------------
-    def send_tensor_bytes(self, tensor_bytes: bytes, address: Tuple[str, int] | None = None) -> None:
+    def send_tensor_bytes(
+        self,
+        tensor_bytes: bytes,
+        address: Tuple[str, int] | None = None
+    ) -> None:
         """Send raw tensor bytes to a peer; no response expected."""
-        payload = {"command": "tensor_bytes", "payload": {"buffer": base64.b64encode(tensor_bytes).decode("ascii")}}
+        payload = {
+            "command": "tensor_bytes",
+            "payload": {"buffer": base64.b64encode(tensor_bytes).decode("ascii")}
+        }
         self._send(payload, expect_reply=False, address=address)
 
-    def recv_tensor_bytes(self, timeout: float = 5.0) -> bytes:
+    def recv_tensor_bytes(
+        self,
+        timeout: float = 5.0,
+        bind_address: Tuple[str, int] | None = None,
+    ) -> bytes:
         """Blocking receive helper; expects peer to initiate a send."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.bind(("0.0.0.0", 0))
-                sock.settimeout(timeout)
-                data, _ = sock.recvfrom(65536)
-                msg = json.loads(data.decode("utf-8"))
+            if not self.in_use:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.bind(bind_address or ("0.0.0.0", 0))
+                    sock.settimeout(timeout)
+                    data, _ = sock.recvfrom(65536)
+                    msg = json.loads(data.decode("utf-8"))
                 buf = msg.get("payload", {}).get("buffer", "")
+                self.in_use = True
                 return base64.b64decode(buf)
+            else:
+                logger.warning(f"recv_tensor_bytes called '{self.peer_client_id}' already in use")
+                logger.info("Try again later")
+                return b""
         except Exception:
             return b""
 
@@ -70,7 +84,12 @@ class PeerClient:
 
     def _send(self, message: dict, expect_reply: bool = True, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         data = json.dumps(message).encode("utf-8")
-        host, port = self._resolve_address(address)
+        if address is not None:
+            host, port = address
+        else:
+            host, port = self.address, self.port
+            logger.warning(f"Using default address {host}:{port}")
+            
         with socket.create_connection((host, port), timeout=3) as sock:
             sock.sendall(data)
             if not expect_reply:
@@ -142,9 +161,7 @@ class PeerClient:
             in_use=False,
             tg_device=str(info.get("tg_device", "CPU")),
         )
-        peer.cpu_make = str(info.get("cpu_make", ""))
         peer.cpu_model = str(info.get("cpu_model", ""))
-        peer.gpu_make = str(info.get("gpu_make", ""))
         peer.gpu_model = str(info.get("gpu_model", ""))
         peer.gpu_vram = str(info.get("gpu_vram", ""))
         peer.gpu_flops = float(info.get("gpu_flops", 0.0) or 0.0)
@@ -231,31 +248,6 @@ class PeerClient:
             sock.close()
         except Exception:
             pass
-
-    def _populate_peer_from_hw(self, peer_info: CDevice, host_info: dict) -> None:
-        devices = host_info.get("devices", [])
-        cpu_info = next((d for d in devices if d.get("device") == "CPU"), {})
-        gpu_info = next((d for d in devices if d.get("device") == "GPU"), {})
-        peer_info.cpu_make = ""
-        peer_info.cpu_model = str(cpu_info.get("name", ""))
-        peer_info.cpu_proc_speed = ""
-        peer_info.cpu_cores = int(cpu_info.get("cores", 0) or 0)
-        peer_info.cpu_ram = str(cpu_info.get("ram_gb", ""))
-        peer_info.gpu_make = ""
-        peer_info.gpu_model = str(gpu_info.get("name", ""))
-        peer_info.gpu_vram = str(gpu_info.get("ram_gb", ""))
-        peer_info.gpu_flops = float(gpu_info.get("flops", 0.0) or 0.0)
-
-
-_PEER_CLIENT: Optional[PeerClient] = None
-
-
-def get_peer_client() -> PeerClient:
-    global _PEER_CLIENT
-    if _PEER_CLIENT is None:
-        _PEER_CLIENT = PeerClient()
-    return _PEER_CLIENT
-
 
 def _to_float(val: Any) -> float:
     try:

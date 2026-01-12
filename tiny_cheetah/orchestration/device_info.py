@@ -105,44 +105,16 @@ def _gpus() -> List[Dict[str, object]]:
 
     # Normalize ram/device fields for consumers.
     for gpu in gpus:
-        if "vendor" not in gpu:
-            gpu["vendor"] = _guess_vendor(str(gpu.get("name", "")))
         if "ram_gb" not in gpu:
             gpu["ram_gb"] = gpu.get("total_mem_gb", 0.0)
         if "vram_gb" not in gpu:
             gpu["vram_gb"] = gpu.get("total_mem_gb", gpu.get("ram_gb", 0.0))
         if "device" not in gpu:
-            gpu["device"] = _vendor_device(str(gpu.get("vendor", "")))
+            gpu["device"] = ""
         if "flops" not in gpu:
             gpu["flops"] = 0.0
 
     return gpus
-
-
-def _guess_vendor(name: str) -> str:
-    lower = name.lower()
-    if "nvidia" in lower or "geforce" in lower or "quadro" in lower or "tesla" in lower:
-        return "NVIDIA"
-    if "amd" in lower or "radeon" in lower or "rx " in lower:
-        return "AMD"
-    if "intel" in lower:
-        return "Intel"
-    if "apple" in lower:
-        return "Apple"
-    return ""
-
-
-def _vendor_device(vendor: str) -> str:
-    lower = vendor.lower()
-    if "nvidia" in lower:
-        return "CUDA"
-    if "amd" in lower:
-        return "AMD"
-    if "intel" in lower:
-        return "CPU"
-    if "apple" in lower:
-        return "METAL"
-    return ""
 
 
 def _cuda_gpus() -> List[Dict[str, object]]:
@@ -313,52 +285,10 @@ def _cpu_device() -> Dict[str, object]:
         "kind": "CPU",
         "device": "CPU",
         "name": _cpu_name(),
-        "vendor": _cpu_vendor(),
         "speed": _cpu_speed(),
         "cores": _cpu_count(),
         "ram_gb": _ram_gb(),
     }
-
-
-def _cpu_vendor() -> str:
-    system = platform.system()
-    if system == "Linux":
-        try:
-            with open("/proc/cpuinfo", "r", encoding="utf-8") as fh:
-                for line in fh:
-                    if "vendor_id" in line.lower():
-                        return line.split(":", 1)[1].strip()
-        except Exception:
-            pass
-    elif system == "Darwin":
-        try:
-            out = subprocess.check_output(
-                ["/usr/sbin/sysctl", "-n", "machdep.cpu.vendor"], text=True, timeout=2
-            )
-            if out.strip():
-                return out.strip()
-        except Exception:
-            pass
-    elif system == "Windows":
-        try:
-            out = subprocess.check_output(
-                ["powershell", "-Command", "(Get-CimInstance Win32_Processor).Manufacturer | Select-Object -First 1"],
-                text=True,
-                timeout=2,
-            )
-            if out.strip():
-                return out.strip()
-        except Exception:
-            try:
-                out = subprocess.check_output(["wmic", "cpu", "get", "Manufacturer"], text=True, timeout=2)
-                for line in out.splitlines():
-                    line = line.strip()
-                    if line and line.lower() != "manufacturer":
-                        return line
-            except Exception:
-                pass
-    return ""
-
 
 def _cpu_speed() -> str:
     if psutil is not None:
@@ -382,7 +312,6 @@ def collect_host_info() -> Dict[str, object]:
             "kind": "GPU",
             "device": gpu.get("device", ""),
             "name": gpu.get("name", "GPU"),
-            "vendor": gpu.get("vendor", ""),
             "ram_gb": gpu.get("total_mem_gb", 0.0),
             "vram_gb": gpu.get("vram_gb", gpu.get("total_mem_gb", 0.0)),
             "flops": gpu.get("flops", 0.0),
