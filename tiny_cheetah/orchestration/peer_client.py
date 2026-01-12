@@ -48,6 +48,7 @@ class PeerClient:
             "command": "tensor_bytes",
             "payload": {"buffer": base64.b64encode(tensor_bytes).decode("ascii")}
         }
+        logger.info(f"Sending tensor bytes from peer '{self.peer_client_id}' to {address or (self.address, self.port)}")
         self._send(payload, expect_reply=False, address=address)
 
     def recv_tensor_bytes(
@@ -89,7 +90,7 @@ class PeerClient:
         else:
             host, port = self.address, self.port
             logger.warning(f"Using default address {host}:{port}")
-            
+
         with socket.create_connection((host, port), timeout=3) as sock:
             sock.sendall(data)
             if not expect_reply:
