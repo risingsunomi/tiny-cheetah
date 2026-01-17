@@ -16,7 +16,6 @@ class CDevice:
         self.ip_address = ip_address
         self.port = port
         self.tg_device = tg_device
-        
         self.cpu_model = ""
         self.cpu_proc_speed = ""
         self.cpu_cores = 0
@@ -44,11 +43,6 @@ class CDevice:
             "ip_address": self.ip_address,
             "port": self.port,
             "tg_device": self.tg_device,
-            "shard": {
-                "model_name": self.shard.model_name,
-                "start_layer": self.shard.start_layer,
-                "end_layer": self.shard.end_layer,
-            },
             "cpu_model": self.cpu_model,
             "cpu_proc_speed": self.cpu_proc_speed,
             "cpu_cores": self.cpu_cores,
