@@ -64,6 +64,7 @@ class TestPeerClientReceiver(unittest.IsolatedAsyncioTestCase):
 
                 try:
                     msg = json.loads(raw.decode("utf-8"))
+                    print(f"Received message from {host}: {msg}")
                 except Exception:
                     continue
                 if msg.get("command") != "tensor_bytes":
@@ -71,6 +72,7 @@ class TestPeerClientReceiver(unittest.IsolatedAsyncioTestCase):
                 buf = msg.get("payload", {}).get("buffer", "")
                 try:
                     payload = base64.b64decode(buf)
+                    self.assertIsInstance(payload, bytes)
                 except Exception:
                     continue
                 if payload == expected:
