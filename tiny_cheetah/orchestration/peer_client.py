@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from contextlib import closing
 
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.models.shard import Shard
@@ -234,31 +235,27 @@ class PeerClient:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", self.port))
+            sock.settimeout(0.5)
         except Exception:
             return
-        while not self._udp_stop.is_set():
-            try:
-                sock.settimeout(0.5)
-                data, addr = sock.recvfrom(4096)
-            except socket.timeout:
-                continue
-            except Exception:
-                break
-            try:
-                msg = json.loads(data.decode("utf-8"))
-            except Exception:
-                continue
-            if msg.get("command") != "ping":
-                continue
-            response = json.dumps(self.peer_info.as_dict()).encode("utf-8")
-            try:
-                sock.sendto(response, addr)
-            except Exception:
-                continue
-        try:
-            sock.close()
-        except Exception:
-            pass
+
+        with closing(sock):
+            while not self._udp_stop.is_set():
+                try:
+                    data, _ = sock.recvfrom(4096)
+                    if not data:
+                        continue
+                    
+                    msg = json.loads(data.decode("utf-8"))
+                    if msg.get("command") != "ping":
+                        continue
+
+                    self._build_peer_from_info(msg)
+                except (socket.timeout, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                except Exception:
+                    if self._udp_stop.is_set():
+                        break
 
     def add_peer(self, host: str, port: int) -> CDevice:
         peer = CDevice(host, port)

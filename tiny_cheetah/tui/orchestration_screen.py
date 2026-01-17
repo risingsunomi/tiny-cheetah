@@ -90,7 +90,7 @@ class OrchestrationScreen(Screen[None]):
     def _local_node_text(self) -> str:
         host_info = self._peer_client.peer_info.as_dict()
         peer_in_use = self._peer_client.in_use
-        status = "[green]● Online[/]" if peer_in_use else "[red]● Busy[/]"
+        status = "[green]● Online[/]" if not peer_in_use else "[red]● Busy[/]"
         cpu_model = host_info.get("cpu_model", "Unknown CPU")
         cpu_proc_speed = host_info.get("cpu_proc_speed", "0hz")
         cpu_cores = host_info.get("cpu_cores", 0)
