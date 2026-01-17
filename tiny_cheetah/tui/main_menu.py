@@ -9,7 +9,7 @@ from .chat_menu import ChatScreen
 from .train_menu import TrainScreen
 from .orchestration_screen import OrchestrationScreen
 from .settings_screen import SettingsScreen
-from tiny_cheetah.orchestration import get_peer_client
+from tiny_cheetah.orchestration.peer_client import PeerClient
 
 
 class MainMenu(App):
@@ -18,6 +18,7 @@ class MainMenu(App):
 
     def __init__(
         self,
+        peer_client: PeerClient,
         training_defaults: Optional[dict] = None,
         chat_default: Optional[str] = None,
         offline_mode: bool = False,
@@ -26,6 +27,7 @@ class MainMenu(App):
         self.training_defaults = training_defaults or {}
         self.chat_default = chat_default
         self.offline_mode = offline_mode
+        self._peer_client = peer_client
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -49,7 +51,6 @@ class MainMenu(App):
         self.title="[tiny-cheetah] v0.1"
         if self.offline_mode:
             self.title += " [offline]"
-        self._peer_manager = get_peer_client()
         self._update_subtitle()
         self.set_interval(2.0, self._update_subtitle)
     
@@ -63,13 +64,13 @@ class MainMenu(App):
             default_model = self.chat_default or defaults.get("model-id") or defaults.get("custom-model-id")
             self.push_screen(ChatScreen(default_model=default_model, offline=self.offline_mode))
         elif button_id == "train-btn":
-            screen = TrainScreen()
+            screen = TrainScreen(peer_manager=self._peer_client, offline_mode=self.offline_mode)
             defaults = getattr(self, "training_defaults", None)
             if defaults:
                 screen.apply_default_settings(defaults)
             self.push_screen(screen)
         elif button_id == "network-btn":
-            self.push_screen(OrchestrationScreen())
+            self.push_screen(OrchestrationScreen(self._peer_client))
         elif button_id == "settings-btn":
             self.push_screen(SettingsScreen())
         elif button_id == "quit-btn":
@@ -79,5 +80,5 @@ class MainMenu(App):
         self.training_defaults = settings or {}
 
     def _update_subtitle(self) -> None:
-        count = self._peer_manager.peer_count()
+        count = self._peer_client.peer_count()
         self.sub_title = f"Active Nodes {count}"

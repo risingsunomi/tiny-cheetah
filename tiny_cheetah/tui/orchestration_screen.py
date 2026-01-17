@@ -28,9 +28,9 @@ class OrchestrationScreen(Screen[None]):
         ("p", "open_peers", "Peer directory"),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, peer_client: PeerClient) -> None:
         super().__init__()
-        self._peer_client = PeerClient
+        self._peer_client = peer_client
         self._summary_panel: Optional[Static] = None
         self._peer_panel: Optional[Static] = None
         self._hostmap_panel: Optional[Static] = None
@@ -117,7 +117,7 @@ class OrchestrationScreen(Screen[None]):
         )
 
     def _network_map_text(self) -> str:
-        peers = self._manager.list_peers(include_self=True)
+        peers = self._manager.get_peers(include_self=True)
         if len(peers) <= 1:
             return "\n".join(
                 [
@@ -160,7 +160,7 @@ class OrchestrationScreen(Screen[None]):
         return "\n".join(ring_lines)
 
     def _host_map_text(self) -> str:
-        peers = self._manager.list_peers(include_self=True)
+        peers = self._manager.get_peers(include_self=True)
         lines = ["[b]Capacity Tree[/]"]
         online = self._manager.is_hosting() or len(peers) > 1
         local_status = "[green]■[/]" if online else "[red]■[/]"

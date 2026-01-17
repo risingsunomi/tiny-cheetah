@@ -8,7 +8,7 @@ from textual.containers import Container
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Static
 
-from tiny_cheetah.orchestration import get_peer_client
+from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.orchestration.cdevice import CDevice
 
 
@@ -16,9 +16,9 @@ class ConnectPeerScreen(Screen[None]):
     CSS_PATH = Path(__file__).with_name("connect_peer_screen.tcss")
     BINDINGS = [("escape", "pop_screen", "Back"), ("b", "pop_screen", "Back")]
 
-    def __init__(self) -> None:
+    def __init__(self, peer_client: PeerClient) -> None:
         super().__init__()
-        self._manager = get_peer_client()
+        self._peer_client = peer_client
         self._host_input = Input(placeholder="host", id="connect-host")
         self._port_input = Input(placeholder="port", id="connect-port")
         self._status: Label | None = None
@@ -60,7 +60,7 @@ class ConnectPeerScreen(Screen[None]):
             self._set_status("Invalid port.")
             return
         try:
-            peer = self._manager.add_peer(host, port)
+            peer = self._peer_client.add_peer(host, port)
         except Exception as exc:
             self._set_status(str(exc))
             return
@@ -86,6 +86,6 @@ class ConnectPeerScreen(Screen[None]):
     def _discover_peers(self) -> None:
         if self.app is None:
             return
-        self._manager.discover_peers()
-        count = self._manager.peer_count()
+        self._peer_client.discover_peers()
+        count = self._peer_client.peer_count()
         self.app.sub_title = f"Active Nodes {count}"

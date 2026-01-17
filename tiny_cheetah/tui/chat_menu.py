@@ -86,7 +86,7 @@ class ChatScreen(Screen[None]):
         self._chat_log_list: Optional[ListView] = None
         self._log_storage = ChatLogStorage()
         self._current_log_id: Optional[int] = None
-        self._peer_manager = PeerClient()
+        self._peer_client = PeerClient()
         self._peer_label: Optional[Label] = None
 
     def compose(self) -> ComposeResult:
@@ -207,8 +207,8 @@ class ChatScreen(Screen[None]):
     def _discover_peers(self) -> None:
         if self.app is None:
             return
-        self._peer_manager.discover_peers()
-        count = self._peer_manager.peer_count()
+        self._peer_client.discover_peers()
+        count = self._peer_client.peer_count()
         self.app.sub_title = f"Active Nodes {count}"
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:

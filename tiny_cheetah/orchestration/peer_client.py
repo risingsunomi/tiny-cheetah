@@ -250,6 +250,11 @@ class PeerClient:
         except Exception:
             pass
 
+    def add_peer(self, host: str, port: int) -> CDevice:
+        peer = CDevice(host, port)
+        self._peers[peer.peer_client_id] = peer
+        return peer
+
 def _to_float(val: Any) -> float:
     try:
         if isinstance(val, str):

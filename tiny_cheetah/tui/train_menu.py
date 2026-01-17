@@ -17,7 +17,7 @@ from textual.app import ComposeResult
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
-from tiny_cheetah.orchestration import get_peer_client
+from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 from rich.markup import escape
 
@@ -159,7 +159,7 @@ class TrainScreen(Screen[None]):
             return value.strip().lower() in {"1", "true", "yes", "on", "y"}
         return bool(value)
 
-    def __init__(self) -> None:
+    def __init__(self, peer_client: PeerClient) -> None:
         super().__init__()
         self._stats = TrainingStats()
         self._training: Optional[TrainingProcess] = None
@@ -183,7 +183,7 @@ class TrainScreen(Screen[None]):
         self._path_summary_label: Optional[Label] = None
         self._auto_training_runs = 1
         self._stopped_by_user = False
-        self._peer_manager = get_peer_client()
+        self._peer_client = peer_client
         self._peer_label: Optional[Label] = None
         self._sync_base_node_name()
 
@@ -642,19 +642,19 @@ class TrainScreen(Screen[None]):
 
         # GPU metrics placeholder (extend in future when integrations are available)
         self._resource_labels["gpu"].update("GPU: N/A")
-        devices = ", ".join(self._peer_manager.aggregate_devices()) or "local only"
-        self._resource_labels["peers"].update(f"Nodes: {self._peer_manager.peer_count()} ({devices})")
+        devices = ", ".join(self._peer_client.aggregate_devices()) or "local only"
+        self._resource_labels["peers"].update(f"Nodes: {self._peer_client.peer_count()} ({devices})")
 
     def _update_peer_banner(self) -> None:
         if self._peer_label is not None:
-            count = self._peer_manager.peer_count()
+            count = self._peer_client.peer_count()
             self._peer_label.update(f"Nodes: {count}")
 
     def _discover_peers(self) -> None:
         if self.app is None:
             return
-        self._peer_manager.discover_peers()
-        count = self._peer_manager.peer_count()
+        self._peer_client.discover_peers()
+        count = self._peer_client.peer_count()
         self.app.sub_title = f"Active Nodes {count}"
 
 

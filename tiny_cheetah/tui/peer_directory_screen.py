@@ -9,7 +9,7 @@ from textual.containers import Container
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Label, Static, DataTable
 
-from tiny_cheetah.orchestration import get_peer_client
+from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.orchestration.cdevice import CDevice
 
 
@@ -17,12 +17,12 @@ class PeerDirectoryScreen(Screen[None]):
     CSS_PATH = Path(__file__).with_name("peer_directory_screen.tcss")
     BINDINGS = [("escape", "pop_screen", "Back"), ("b", "pop_screen", "Back")]
 
-    def __init__(self) -> None:
+    def __init__(self, peer_client: PeerClient) -> None:
         super().__init__()
-        self._manager = get_peer_client()
         self._peer_table: Optional[DataTable] = None
         self._detail_panel: Optional[Static] = None
         self._selected_peer: Optional[str] = None
+        self._peer_client = peer_client
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -64,8 +64,8 @@ class PeerDirectoryScreen(Screen[None]):
             return
         if event.button.id == "peer-connect" and self._selected_peer:
             # Disconnect if already connected, otherwise instruct to connect via network screen.
-            if self._selected_peer in {p.peer_client_id for p in self._manager.list_peers()}:
-                self._manager.disconnect_peer(self._selected_peer)
+            if self._selected_peer in {p.peer_client_id for p in self._peer_client.get_peers()}:
+                self._peer_client.disconnect_peer(self._selected_peer)
                 self._selected_peer = None
                 self._refresh_peers()
                 self._set_detail("Peer disconnected.")
@@ -80,7 +80,7 @@ class PeerDirectoryScreen(Screen[None]):
             return
         selected = self._selected_peer
         self._peer_table.clear()
-        peers = self._manager.list_peers()
+        peers = self._peer_client.get_peers()
         for peer in peers:
             row_key = f"peer-{peer.peer_client_id}"
             self._peer_table.add_row(*self._peer_row(peer), key=row_key)
@@ -98,7 +98,7 @@ class PeerDirectoryScreen(Screen[None]):
         if not self._selected_peer:
             self._detail_panel.update("Select a peer to view details.")
             return
-        peer = next((p for p in self._manager.list_peers() if p.peer_client_id == self._selected_peer), None)
+        peer = next((p for p in self._peer_client.get_peers() if p.peer_client_id == self._selected_peer), None)
         if peer is None:
             self._detail_panel.update("Peer unavailable.")
             return
@@ -147,7 +147,7 @@ class PeerDirectoryScreen(Screen[None]):
     def _update_connect_label(self) -> None:
         if self._connect_button is None:
             return
-        if self._selected_peer and self._selected_peer in {p.peer_client_id for p in self._manager.list_peers()}:
+        if self._selected_peer and self._selected_peer in {p.peer_client_id for p in self._peer_client.get_peers()}:
             self._connect_button.label = "Disconnect"
             self._connect_button.variant = "warning"
         else:
@@ -157,6 +157,6 @@ class PeerDirectoryScreen(Screen[None]):
     def _discover_peers(self) -> None:
         if self.app is None:
             return
-        self._manager.discover_peers()
-        count = self._manager.peer_count()
+        self._peer_client.discover_peers()
+        count = self._peer_client.peer_count()
         self.app.sub_title = f"Active Nodes {count}"
