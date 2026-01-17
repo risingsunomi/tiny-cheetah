@@ -16,7 +16,7 @@ class CDevice:
         self.ip_address = ip_address
         self.port = port
         self.tg_device = tg_device
-        self.shard = Shard("", 0, 0, 0)
+        
         self.cpu_model = ""
         self.cpu_proc_speed = ""
         self.cpu_cores = 0

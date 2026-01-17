@@ -31,8 +31,8 @@ class PeerClient:
             self.port,
             os.getenv("TC_DEVICE", "CPU")
         )
-        self.in_use = False
-        self.peers: Dict[str, CDevice] = {self.peer_client_id: self.peer_info}
+        self.shard = Shard("", 0, 0, 0)
+        self._peers: Dict[str, CDevice] = {self.peer_client_id: self.peer_info}
         self._lock = threading.RLock()
         self._udp_thread: Optional[threading.Thread] = None
         self._udp_stop = threading.Event()
@@ -121,30 +121,30 @@ class PeerClient:
 
     # Discovery -----------------------------------------------------------
     def discover_peers(self) -> None:
-        self.peers = {self.peer_client_id: self.peer_info}
+        self._peers = {self.peer_client_id: self.peer_info}
 
         # UDP broadcast
         for info in self._discover_local_udp():
             peer = self._build_peer_from_info(info)
             if peer is None or peer.peer_client_id == self.peer_client_id:
                 continue
-            self.peers[peer.peer_client_id] = peer
+            self._peers[peer.peer_client_id] = peer
 
     # Connections ---------------------------------------------------------
     def get_peers(self, include_self: bool = False) -> List[CDevice]:
         if include_self:
-            return list(self.peers.values())
-        return [p for pid, p in self.peers.items() if pid != self.peer_client_id]
+            return list(self._peers.values())
+        return [p for pid, p in self._peers.items() if pid != self.peer_client_id]
 
     def peer_count(self) -> int:
-        return len(self.peers)
+        return len(self._peers)
 
     def assign_shards(self, model_name: str, total_layers: int) -> None:
         ModelEngine.plan_shards(self._ordered_peers(), model_name, total_layers)
 
     # Internal ------------------------------------------------------------
     def _ordered_peers(self) -> List[CDevice]:
-        peers = [p for p in self.peers.values() if p.peer_client_id != self.peer_client_id]
+        peers = [p for p in self._peers.values() if p.peer_client_id != self.peer_client_id]
 
         def capacity(peer: CDevice) -> float:
             vram = _to_float(peer.gpu_vram)
@@ -153,7 +153,7 @@ class PeerClient:
 
         return sorted(peers, key=capacity, reverse=True)
 
-    def _build_peer_from_info(self, info: dict) -> Optional[CDevice]:
+    def _build_peer_from_info(self, info: dict) -> Optional[PeerClient]:
         peer_client_id = info.get("peer_client_id")
         if not peer_client_id:
             return None
@@ -177,11 +177,11 @@ class PeerClient:
         peer.gpu_model = str(info.get("gpu_model", ""))
         peer.gpu_vram = str(info.get("gpu_vram", ""))
         peer.gpu_flops = float(info.get("gpu_flops", 0.0) or 0.0)
-        return peer
 
-    def _discover_local_udp(self) -> List[dict]:
-        results: List[dict] = []
-        payload = json.dumps({"command": "ping"}).encode("utf-8")
+        return PeerClient(peer)
+
+    def _discover_local_udp(self):
+        payload = json.dumps({"command": "D001"}).encode("utf-8")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -193,19 +193,26 @@ class PeerClient:
                 except socket.timeout:
                     break
                 try:
-                    peer_info = json.loads(data.decode("utf-8"))
-                    self._build_peer_from_info(peer_info)
-                    results.append(peer_info)
+                    udp_peer_info = json.loads(data.decode("utf-8"))
+                    udp_peer_client = PeerClient(
+                        udp_peer_info.get("peer_client_id"),
+                        udp_peer_info.get("ip_address"),
+                        udp_peer_info.get("port"),
+                        udp_peer_info.get("tg_device", "CPU"),
+                        udp_peer_info.get("shard", None)
+                    )
+
+                    self._peers[udp_peer_client.peer_client_id] = udp_peer_client
                 except Exception:
                     continue
         except Exception:
-            return results
+            logger.error("Error discovering local UDP peers", exc_info=True)
+            yield
         finally:
             try:
                 sock.close()
             except Exception:
                 pass
-        return results
 
     def _ping_peer_udp(self, peer: CDevice) -> dict:
         payload = json.dumps({"command": "ping"}).encode("utf-8")
@@ -247,10 +254,12 @@ class PeerClient:
                         continue
                     
                     msg = json.loads(data.decode("utf-8"))
-                    if msg.get("command") != "ping":
-                        continue
-
-                    self._build_peer_from_info(msg)
+                    if msg.get("command") == "D001":
+                        response = self.as_dict()
+                        response["command"] = "D002"
+                        resp_data = json.dumps(response).encode("utf-8")
+                        sock.sendto(resp_data, _)
+                        
                 except (socket.timeout, UnicodeDecodeError, json.JSONDecodeError):
                     continue
                 except Exception:
@@ -261,6 +270,20 @@ class PeerClient:
         peer = CDevice(host, port)
         self._peers[peer.peer_client_id] = peer
         return peer
+
+    def as_dict(self) -> dict:
+        return {
+            "peer_client_id": self.peer_client_id,
+            "ip_address": self.ip_address,
+            "port": self.port,
+            "tg_device": self.tg_device,
+            "shard": {
+                "model_name": self.shard.model_name,
+                "start_layer": self.shard.start_layer,
+                "end_layer": self.shard.end_layer,
+            },
+            "peer_info": self.peer_info.as_dict()
+        }
 
 def _to_float(val: Any) -> float:
     try:
