@@ -85,15 +85,15 @@ class OrchestrationScreen(Screen[None]):
     def _discover_peers(self) -> None:
         if self.app is None:
             return
-        self._manager.discover_peers()
-        count = self._manager.peer_count()
+        self._peer_client.discover_peers()
+        count = self._peer_client.peer_count()
         current = getattr(self.app, "sub_title", "")
         new_title = f"Host Dashboard · Active Nodes {count}"
         if new_title != current:
             self.app.sub_title = new_title
 
     def _local_node_text(self) -> str:
-        host_info = self._manager.get_host_info()
+        host_info = self._peer_client.get_host_info()
         online = True
         status = "[green]● Online[/]" if online else "[red]● Offline[/]"
         devices = host_info.get("devices", []) or []
@@ -106,7 +106,7 @@ class OrchestrationScreen(Screen[None]):
             [
                 "[b]Local Node Info[/]",
                 "Identity:",
-                f"- Node: {self._manager.peer_id}",
+                f"- Node: {self._peer_client.peer_id}",
                 f"- Status: {status}",
                 "",
                 "Hardware:",
@@ -117,7 +117,7 @@ class OrchestrationScreen(Screen[None]):
         )
 
     def _network_map_text(self) -> str:
-        peers = self._manager.get_peers(include_self=True)
+        peers = self._peer_client.get_peers(include_self=True)
         if len(peers) <= 1:
             return "\n".join(
                 [
@@ -132,8 +132,8 @@ class OrchestrationScreen(Screen[None]):
 
         ring_lines = ["[b]Peer Ring[/]"]
         ring_lines.append("Order:")
-        ordered = [p for p in peers if p.peer_id != self._manager.peer_id]
-        ordered.insert(0, self._manager.peer_info)  # self first in ring
+        ordered = [p for p in peers if p.peer_id != self._peer_client.peer_id]
+        ordered.insert(0, self._peer_client.peer_info)  # self first in ring
 
         for idx, peer in enumerate(ordered):
             ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
@@ -160,13 +160,13 @@ class OrchestrationScreen(Screen[None]):
         return "\n".join(ring_lines)
 
     def _host_map_text(self) -> str:
-        peers = self._manager.get_peers(include_self=True)
+        peers = self._peer_client.get_peers(include_self=True)
         lines = ["[b]Capacity Tree[/]"]
-        online = self._manager.is_hosting() or len(peers) > 1
+        online = self._peer_client.is_hosting() or len(peers) > 1
         local_status = "[green]■[/]" if online else "[red]■[/]"
-        lines.append(f"{local_status} {self._manager.peer_id}")
+        lines.append(f"{local_status} {self._peer_client.peer_id}")
         for peer in peers:
-            if peer.peer_id == self._manager.peer_id:
+            if peer.peer_id == self._peer_client.peer_id:
                 continue
             status = "[green]■[/]" if peer.available else "[red]■[/]"
             hw = peer.device_report or {}
