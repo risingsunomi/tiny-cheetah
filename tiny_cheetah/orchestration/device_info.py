@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import sys
 import subprocess
 import re
+from pathlib import Path
 from typing import Dict, List
+from difflib import SequenceMatcher
 
 from tiny_cheetah.logging_utils import get_logger
 
@@ -111,10 +114,41 @@ def _gpus() -> List[Dict[str, object]]:
             gpu["vram_gb"] = gpu.get("total_mem_gb", gpu.get("ram_gb", 0.0))
         if "device" not in gpu:
             gpu["device"] = ""
-        if "flops" not in gpu:
-            gpu["flops"] = 0.0
+        if not gpu.get("flops"):
+            gpu["flops"] = _match_flops(str(gpu.get("name", "")))
 
     return gpus
+
+
+def _match_flops(name: str) -> float:
+    name = name.lower()
+    try:
+        path = Path(__file__).with_name("flops.json")
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            
+            best_match = None
+            highest_ratio = 0.0
+            
+            for key, value in data.items():
+                # 1. Check for exact match or direct containment (Fast)
+                if key in name or name in key:
+                    return float(value)
+                
+                # 2. Calculate similarity percentage (Fuzzy)
+                ratio = SequenceMatcher(None, name, key).ratio()
+                if ratio > highest_ratio:
+                    highest_ratio = ratio
+                    best_match = value
+            
+            # Return best match if it's "close enough" (e.g., > 60% match)
+            if highest_ratio > 0.6:
+                return float(best_match)
+                
+    except Exception as exc:
+        print(f"Failed to load flops.json: {exc}")
+        
+    return 0.0
 
 
 def _cuda_gpus() -> List[Dict[str, object]]:

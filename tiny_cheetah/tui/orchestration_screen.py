@@ -93,15 +93,16 @@ class OrchestrationScreen(Screen[None]):
             self.app.sub_title = new_title
 
     def _local_node_text(self) -> str:
-        host_info = self._peer_client.get_host_info()
+        host_info = self._peer_client.peer_info.as_dict()
         online = True
         status = "[green]● Online[/]" if online else "[red]● Offline[/]"
-        devices = host_info.get("devices", []) or []
-        cpu_entry = next((d for d in devices if d.get("device") == "CPU"), {})
-        gpu_entries = [d for d in devices if d.get("device") == "GPU"]
-        cpu_cores = cpu_entry.get("cores", "--")
-        ram = cpu_entry.get("ram_gb", "--")
-        gpu_line = ", ".join(d.get("name", "GPU") for d in gpu_entries) if gpu_entries else "No GPUs"
+        cpu_model = host_info.get("cpu_model", "Unknown CPU")
+        cpu_proc_speed = host_info.get("cpu_proc_speed", "0hz")
+        cpu_cores = host_info.get("cpu_cores", 0)
+        cpu_ram = host_info.get("cpu_ram", "0B")
+        gpu_model = host_info.get("gpu_model", "Unknown GPU")
+        gpu_vram = host_info.get("gpu_vram", "0B")
+        gpu_flops = host_info.get("gpu_flops", 0.0)
         return "\n".join(
             [
                 "[b]Local Node Info[/]",
@@ -110,9 +111,9 @@ class OrchestrationScreen(Screen[None]):
                 f"- Status: {status}",
                 "",
                 "Hardware:",
-                f"- CPU cores: {cpu_cores}",
-                f"- RAM: {ram} GB",
-                f"- GPUs: {gpu_line}",
+                f"- CPU: {cpu_model} @ {cpu_proc_speed} ({cpu_cores} cores)",
+                f"- RAM: {cpu_ram} GB",
+                f"- GPUs: {gpu_model} ({gpu_vram} VRAM, {gpu_flops} FLOPS)",
             ]
         )
 
