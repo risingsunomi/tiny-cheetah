@@ -18,7 +18,6 @@ class MainMenu(App):
 
     def __init__(
         self,
-        peer_client: PeerClient,
         training_defaults: Optional[dict] = None,
         chat_default: Optional[str] = None,
         offline_mode: bool = False,
@@ -27,7 +26,7 @@ class MainMenu(App):
         self.training_defaults = training_defaults or {}
         self.chat_default = chat_default
         self.offline_mode = offline_mode
-        self._peer_client = peer_client
+        self._peer_client = PeerClient()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
