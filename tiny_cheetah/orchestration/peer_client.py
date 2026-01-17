@@ -36,6 +36,7 @@ class PeerClient:
         self._udp_thread: Optional[threading.Thread] = None
         self._udp_stop = threading.Event()
         self._start_udp_responder()
+        self.in_use = False
 
     # Networking ---------------------------------------------------------
     def send_tensor_bytes(
@@ -57,6 +58,7 @@ class PeerClient:
         bind_address: Tuple[str, int] | None = None,
     ) -> bytes:
         """Blocking receive helper; expects peer to initiate a send."""
+        self.in_use = True
         try:
             if not self.in_use:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -65,41 +67,49 @@ class PeerClient:
                     data, _ = sock.recvfrom(65536)
                     msg = json.loads(data.decode("utf-8"))
                 buf = msg.get("payload", {}).get("buffer", "")
-                self.in_use = True
+                self.in_use = False
                 return base64.b64decode(buf)
             else:
                 logger.warning(f"recv_tensor_bytes called '{self.peer_client_id}' already in use")
-                logger.info("Try again later")
-                return b""
+                logger.info("Try again later")        
         except Exception:
-            return b""
-
+            logger.exception("Error receiving tensor bytes")
+        
+        self.in_use = False
+        return b""
+    
     def ping(self, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         try:
             return self._send({"command": "ping"}, expect_reply=True, address=address)
         except Exception as exc:
-            return {"error": str(exc)}
+            logger.error(f"Ping failed: {exc}")
+
+        return {}
 
     def send_payload(self, message: dict, *, expect_reply: bool = True, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         return self._send(message, expect_reply=expect_reply, address=address)
 
     def _send(self, message: dict, expect_reply: bool = True, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
-        data = json.dumps(message).encode("utf-8")
-        if address is not None:
-            host, port = address
-        else:
-            host, port = self.address, self.port
-            logger.warning(f"Using default address {host}:{port}")
-
-        with socket.create_connection((host, port), timeout=3) as sock:
-            sock.sendall(data)
-            if not expect_reply:
-                return {}
-            sock.shutdown(socket.SHUT_WR)
-            response = sock.recv(65536)
+        self.in_use = True
         try:
-            return json.loads(response.decode("utf-8"))
+            data = json.dumps(message).encode("utf-8")
+            if address is not None:
+                host, port = address
+            else:
+                host, port = self.address, self.port
+                logger.warning(f"Using default address {host}:{port}")
+
+            with socket.create_connection((host, port), timeout=3) as sock:
+                sock.sendall(data)
+                if not expect_reply:
+                    return {}
+                sock.shutdown(socket.SHUT_WR)
+                response = sock.recv(65536)
+            
+                self.in_use = False
+                return json.loads(response.decode("utf-8"))
         except Exception as err:
+            self.in_use = False
             logger.error("Invalid response from peer %s: %s", self.peer_client_id, err)
             raise
 

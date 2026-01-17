@@ -48,9 +48,6 @@ class OrchestrationScreen(Screen[None]):
                 network_panel = Static(self._network_map_text(), id="orch-network")
                 self._peer_panel = network_panel
                 yield network_panel
-                hostmap_panel = Static(self._host_map_text(), id="orch-hostmap")
-                self._hostmap_panel = hostmap_panel
-                yield hostmap_panel
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -65,7 +62,7 @@ class OrchestrationScreen(Screen[None]):
         self.app.push_screen(ConnectPeerScreen())
 
     def action_open_peers(self) -> None:
-        self.app.push_screen(PeerDirectoryScreen())
+        self.app.push_screen(PeerDirectoryScreen(self._peer_client))
     
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
@@ -76,8 +73,6 @@ class OrchestrationScreen(Screen[None]):
             self._summary_panel.update(self._local_node_text())
         if self._peer_panel is not None:
             self._peer_panel.update(self._network_map_text())
-        if self._hostmap_panel is not None:
-            self._hostmap_panel.update(self._host_map_text())
         if self._refresh_label is not None:
             self._refresh_label.update("")
         self._update_action_variants()
@@ -94,8 +89,8 @@ class OrchestrationScreen(Screen[None]):
 
     def _local_node_text(self) -> str:
         host_info = self._peer_client.peer_info.as_dict()
-        online = True
-        status = "[green]● Online[/]" if online else "[red]● Offline[/]"
+        peer_in_use = self._peer_client.in_use
+        status = "[green]● Online[/]" if peer_in_use else "[red]● Busy[/]"
         cpu_model = host_info.get("cpu_model", "Unknown CPU")
         cpu_proc_speed = host_info.get("cpu_proc_speed", "0hz")
         cpu_cores = host_info.get("cpu_cores", 0)
@@ -107,7 +102,7 @@ class OrchestrationScreen(Screen[None]):
             [
                 "[b]Local Node Info[/]",
                 "Identity:",
-                f"- Node: {self._peer_client.peer_id}",
+                f"- Node: {self._peer_client.peer_client_id}",
                 f"- Status: {status}",
                 "",
                 "Hardware:",
@@ -133,7 +128,7 @@ class OrchestrationScreen(Screen[None]):
 
         ring_lines = ["[b]Peer Ring[/]"]
         ring_lines.append("Order:")
-        ordered = [p for p in peers if p.peer_id != self._peer_client.peer_id]
+        ordered = [p for p in peers if p.peer_client_id != self._peer_client.peer_client_id]
         ordered.insert(0, self._peer_client.peer_info)  # self first in ring
 
         for idx, peer in enumerate(ordered):
@@ -152,38 +147,13 @@ class OrchestrationScreen(Screen[None]):
             shard_span = ""
             if shard:
                 shard_span = f" L{shard.get('start_layer', 0)}-{shard.get('end_layer', 0)}"
-            line = f"{idx+1:>2}) {_status(peer)} {peer.peer_id} [{gpu_name}] ({ping}){shard_span}"
+            line = f"{idx+1:>2}) {_status(peer)} {peer.peer_client_id} [{gpu_name}] ({ping}){shard_span}"
             ring_lines.append(line)
 
         # visual wrap indicator
         if len(ordered) > 1:
             ring_lines.append(" └─ wrap → back to 1")
         return "\n".join(ring_lines)
-
-    def _host_map_text(self) -> str:
-        peers = self._peer_client.get_peers(include_self=True)
-        lines = ["[b]Capacity Tree[/]"]
-        online = self._peer_client.is_hosting() or len(peers) > 1
-        local_status = "[green]■[/]" if online else "[red]■[/]"
-        lines.append(f"{local_status} {self._peer_client.peer_id}")
-        for peer in peers:
-            if peer.peer_id == self._peer_client.peer_id:
-                continue
-            status = "[green]■[/]" if peer.available else "[red]■[/]"
-            hw = peer.device_report or {}
-            devices = hw.get("devices", []) or hw.get("gpus", []) or []
-            gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
-            cpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "CPU"), None)
-            gpu = gpu_entry.get("name", peer.gpu_description or "GPU") if gpu_entry else (peer.gpu_description or "GPU")
-            ram = cpu_entry.get("ram_gb", "--") if cpu_entry else hw.get("ram_gb", "--")
-            shard_obj = getattr(peer, "shard", None)
-            shard_span = ""
-            if shard_obj:
-                shard_span = f" | L{getattr(shard_obj,'start_layer',0)}-{getattr(shard_obj,'end_layer',0)}"
-            lines.append(f" ├─ {status} {peer.peer_id} [{gpu}, {ram}GB]{shard_span}")
-        if len(lines) == 2:
-            lines.append(" └─ No peers connected")
-        return "\n".join(lines)
     
     
 

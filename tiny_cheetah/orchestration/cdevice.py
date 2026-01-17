@@ -43,7 +43,6 @@ class CDevice:
             "peer_client_id": self.peer_client_id,
             "ip_address": self.ip_address,
             "port": self.port,
-            "in_use": self.in_use,
             "tg_device": self.tg_device,
             "shard": {
                 "model_name": self.shard.model_name,
