@@ -51,8 +51,8 @@ class OrchestrationScreen(Screen[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        await asyncio.to_thread(self._discover_peers)
-        self.set_interval(5.0, self._discover_peers)
+        await asyncio.to_thread(self._get_peer_count)
+        self.set_interval(5.0, self._get_peer_count)
 
     # Textual actions ---------------------------------------------------------
     def action_refresh_panels(self) -> None:
@@ -77,15 +77,15 @@ class OrchestrationScreen(Screen[None]):
             self._refresh_label.update("")
         self._update_action_variants()
 
-    def _discover_peers(self) -> None:
+    def _get_peer_count(self) -> None:
         if self.app is None:
             return
-        self._peer_client.discover_peers()
         count = self._peer_client.peer_count()
-        current = getattr(self.app, "sub_title", "")
-        new_title = f"Host Dashboard · Active Nodes {count}"
-        if new_title != current:
-            self.app.sub_title = new_title
+        if count > 1:
+            current = getattr(self.app, "sub_title", "")
+            new_title = f"Host Dashboard · Active Nodes {count}"
+            if new_title != current:
+                self.app.sub_title = new_title
 
     def _local_node_text(self) -> str:
         host_info = self._peer_client.peer_info.as_dict()
@@ -114,45 +114,54 @@ class OrchestrationScreen(Screen[None]):
 
     def _network_map_text(self) -> str:
         peers = self._peer_client.get_peers(include_self=True)
-        if len(peers) <= 1:
-            return "\n".join(
-                [
-                    "[b]Peer Ring[/]",
-                    "No remote peers in the ring.",
-                    "Press a to add a peer by IP or p to open peer directory.",
-                ]
-            )
-
         def _status(peer) -> str:
-            return "[green]●[/]" if peer.available else "[red]●[/]"
+            available = getattr(peer, "available", None)
+            if available is not None:
+                return "[green]●[/]" if available else "[red]●[/]"
+            in_use = getattr(peer, "in_use", None)
+            if in_use is not None:
+                return "[red]●[/]" if in_use else "[green]●[/]"
+            return "[green]●[/]"
 
-        ring_lines = ["[b]Peer Ring[/]"]
-        ring_lines.append("Order:")
+        def _host_label(peer) -> str:
+            hw = getattr(peer, "device_report", None)
+            hostname = ""
+            if isinstance(hw, dict):
+                hostname = str(hw.get("hostname", "")).strip()
+            host = hostname or str(getattr(peer, "ip_address", "") or getattr(peer, "address", "")).strip()
+            if host in {"", "0.0.0.0"}:
+                host = str(getattr(peer, "peer_client_id", "peer"))
+            return host
+
+        def _flops_value(peer) -> float:
+            flops = getattr(peer, "gpu_flops", 0.0) or 0.0
+            if not flops and hasattr(peer, "peer_info"):
+                flops = getattr(peer.peer_info, "gpu_flops", 0.0) or 0.0
+            hw = getattr(peer, "device_report", None)
+            if not flops and isinstance(hw, dict):
+                devices = hw.get("devices", []) or hw.get("gpus", [])
+                for device in devices:
+                    if not isinstance(device, dict):
+                        continue
+                    if device.get("kind") == "GPU" or device.get("device") == "GPU":
+                        try:
+                            flops = float(device.get("flops", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            flops = 0.0
+                        break
+            return flops
+
+        ring_lines = ["[b]Peers[/]"]
         ordered = [p for p in peers if p.peer_client_id != self._peer_client.peer_client_id]
         ordered.insert(0, self._peer_client.peer_info)  # self first in ring
 
-        for idx, peer in enumerate(ordered):
-            ping = f"{peer.ping_ms:.0f}ms" if getattr(peer, "ping_ms", 0) or peer.ping_ms == 0 else "--"
-            hw = peer.device_report or {}
-            devices = hw.get("devices", []) or hw.get("gpus", [])
-            gpu_entry = next((d for d in devices if isinstance(d, dict) and d.get("device") == "GPU"), None)
-            gpu_name = gpu_entry.get("name", peer.gpu_description or "GPU") if gpu_entry else (peer.gpu_description or "GPU")
-            shard_obj = getattr(peer, "shard", None)
-            shard = {}
-            if shard_obj:
-                shard = {
-                    "start_layer": getattr(shard_obj, "start_layer", 0),
-                    "end_layer": getattr(shard_obj, "end_layer", 0),
-                }
-            shard_span = ""
-            if shard:
-                shard_span = f" L{shard.get('start_layer', 0)}-{shard.get('end_layer', 0)}"
-            line = f"{idx+1:>2}) {_status(peer)} {peer.peer_client_id} [{gpu_name}] ({ping}){shard_span}"
-            ring_lines.append(line)
-
-        # visual wrap indicator
-        if len(ordered) > 1:
-            ring_lines.append(" └─ wrap → back to 1")
+        for peer in ordered:
+            flops = _flops_value(peer)
+            flops_label = f"{flops:.1f} TFLOPS" if flops else "-- TFLOPS"
+            ring_lines.append("")
+            ring_lines.append(f"    🖥️    {_status(peer)}")
+            ring_lines.append(_host_label(peer))
+            ring_lines.append(flops_label)
         return "\n".join(ring_lines)
     
     

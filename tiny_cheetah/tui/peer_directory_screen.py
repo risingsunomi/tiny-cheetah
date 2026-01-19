@@ -47,8 +47,8 @@ class PeerDirectoryScreen(Screen[None]):
             self._peer_table.add_columns("", "Name", "CPU/RAM", "GPU", "Ping")
         self._refresh_peers()
         self.set_interval(3.0, self._refresh_peers)
-        await asyncio.to_thread(self._discover_peers)
-        self.set_interval(1.0, self._discover_peers)
+        await asyncio.to_thread(self._get_peer_count)
+        self.set_interval(1.0, self._get_peer_count)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table is not self._peer_table:
@@ -154,9 +154,12 @@ class PeerDirectoryScreen(Screen[None]):
             self._connect_button.label = "Connect"
             self._connect_button.variant = "primary"
 
-    def _discover_peers(self) -> None:
+    def _get_peer_count(self) -> None:
         if self.app is None:
             return
-        self._peer_client.discover_peers()
         count = self._peer_client.peer_count()
-        self.app.sub_title = f"Active Nodes {count}"
+        if count > 1:
+            current = getattr(self.app, "sub_title", "")
+            new_title = f"Host Dashboard · Active Nodes {count}"
+            if new_title != current:
+                self.app.sub_title = new_title

@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Optional
 
+import asyncio
+
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Button, Label
 from textual.containers import Container, Center
@@ -46,12 +48,12 @@ class MainMenu(App):
             yield Button("Settings", id="settings-btn")
             yield Button("Quit", id="quit-btn")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.title="[tiny-cheetah] v0.1"
         if self.offline_mode:
             self.title += " [offline]"
-        self._update_subtitle()
-        self.set_interval(2.0, self._update_subtitle)
+        await asyncio.to_thread(self._get_peer_count)
+        self.set_interval(5.0, self._get_peer_count)
     
     def action_pop_screen(self):
         exit()
@@ -78,6 +80,10 @@ class MainMenu(App):
     def set_training_defaults(self, settings: Optional[dict]) -> None:
         self.training_defaults = settings or {}
 
-    def _update_subtitle(self) -> None:
+    def _get_peer_count(self) -> None:
         count = self._peer_client.peer_count()
-        self.sub_title = f"Active Nodes {count}"
+        if count > 1:
+            current = getattr(self.app, "sub_title", "")
+            new_title = f"Host Dashboard · Active Nodes {count}"
+            if new_title != current:
+                self.app.sub_title = new_title

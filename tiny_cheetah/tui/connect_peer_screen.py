@@ -43,7 +43,7 @@ class ConnectPeerScreen(Screen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "connect-btn":
             self._connect_peer()
-        self._discover_peers()
+        self._get_peer_count()
 
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
@@ -80,12 +80,15 @@ class ConnectPeerScreen(Screen[None]):
             self._host_info.update("\n".join(lines))
 
     async def on_mount(self) -> None:
-        await asyncio.to_thread(self._discover_peers)
-        self.set_interval(1.0, self._discover_peers)
+        await asyncio.to_thread(self._get_peer_count)
+        self.set_interval(5.0, self._get_peer_count)
 
-    def _discover_peers(self) -> None:
+    def _get_peer_count(self) -> None:
         if self.app is None:
             return
-        self._peer_client.discover_peers()
         count = self._peer_client.peer_count()
-        self.app.sub_title = f"Active Nodes {count}"
+        if count > 1:
+            current = getattr(self.app, "sub_title", "")
+            new_title = f"Host Dashboard · Active Nodes {count}"
+            if new_title != current:
+                self.app.sub_title = new_title

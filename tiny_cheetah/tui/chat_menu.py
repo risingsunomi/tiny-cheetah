@@ -136,8 +136,8 @@ class ChatScreen(Screen[None]):
             self._model_label.update(self._model_id or "<select>")
         await self._initialize_chat_logs()
         # Slow down peer discovery to avoid UI pauses while typing.
-        await asyncio.to_thread(self._discover_peers)
-        self.set_interval(5.0, self._discover_peers)
+        await asyncio.to_thread(self._get_peer_count)
+        self.set_interval(5.0, self._get_peer_count)
 
     def action_open_model_picker(self) -> None:
         self._open_model_picker()
@@ -204,12 +204,15 @@ class ChatScreen(Screen[None]):
         self._clear_model(persist=False)
         self.app.pop_screen()
 
-    def _discover_peers(self) -> None:
+    def _get_peer_count(self) -> None:
         if self.app is None:
             return
-        self._peer_client.discover_peers()
         count = self._peer_client.peer_count()
-        self.app.sub_title = f"Active Nodes {count}"
+        if count > 1:
+            current = getattr(self.app, "sub_title", "")
+            new_title = f"Host Dashboard · Active Nodes {count}"
+            if new_title != current:
+                self.app.sub_title = new_title
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":

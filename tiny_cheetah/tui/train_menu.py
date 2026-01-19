@@ -263,9 +263,8 @@ class TrainScreen(Screen[None]):
         if self._path_summary_label is None:
             self._path_summary_label = self.query_one("#training-path-summary", Label)
         self._update_settings_summary()
-        self.set_interval(2.0, self._update_peer_banner)
-        await asyncio.to_thread(self._discover_peers)
-        self.set_interval(1.0, self._discover_peers)
+        await asyncio.to_thread(self._get_peer_count)
+        self.set_interval(5.0, self._get_peer_count)
 
         self._poll_timer = self.set_interval(0.25, self._poll_training_output, pause=True)
         self._resource_timer = self.set_interval(1.0, self._update_resource_usage)
@@ -645,15 +644,9 @@ class TrainScreen(Screen[None]):
         devices = ", ".join(self._peer_client.aggregate_devices()) or "local only"
         self._resource_labels["peers"].update(f"Nodes: {self._peer_client.peer_count()} ({devices})")
 
-    def _update_peer_banner(self) -> None:
-        if self._peer_label is not None:
-            count = self._peer_client.peer_count()
-            self._peer_label.update(f"Nodes: {count}")
-
-    def _discover_peers(self) -> None:
+    def _get_peer_count(self) -> None:
         if self.app is None:
             return
-        self._peer_client.discover_peers()
         count = self._peer_client.peer_count()
         self.app.sub_title = f"Active Nodes {count}"
 

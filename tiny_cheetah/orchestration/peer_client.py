@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from contextlib import closing
+import asyncio
 
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.models.shard import Shard
@@ -32,12 +33,17 @@ class PeerClient:
             os.getenv("TC_DEVICE", "CPU")
         )
         self.shard = Shard("", 0, 0, 0)
-        self._peers: Dict[str, CDevice] = {self.peer_client_id: self.peer_info}
-        self._lock = threading.RLock()
-        self._udp_thread: Optional[threading.Thread] = None
-        self._udp_stop = threading.Event()
-        self._start_udp_responder()
         self.in_use = False
+        self._peers: Dict[str, PeerClient] = {self.peer_client_id: self.peer_info}
+        self._lock = threading.RLock()
+        self._thread_ping: Optional[threading.Thread] = None
+        self._thread_udp_discovery: Optional[threading.Thread] = None
+        self._thread_udp_brodcast: Optional[threading.Thread] = None
+        self._udp_stop = threading.Event()
+        
+
+        self._run_udp_response()
+        self._run_udp_discover()
 
     # Networking ---------------------------------------------------------
     def send_tensor_bytes(
@@ -124,7 +130,7 @@ class PeerClient:
         self._peers = {self.peer_client_id: self.peer_info}
 
         # UDP broadcast
-        for info in self._discover_local_udp():
+        for info in self._udp_discover():
             peer = self._build_peer_from_info(info)
             if peer is None or peer.peer_client_id == self.peer_client_id:
                 continue
@@ -180,85 +186,117 @@ class PeerClient:
 
         return PeerClient(peer)
 
-    def _discover_local_udp(self):
-        payload = json.dumps({"command": "D001"}).encode("utf-8")
+    # Ping handling
+    # --------------------------------
+    def _ping_peer(self, peer_client: PeerClient) -> dict:
+        missed_pong = {}
+        while not self._ping_stop.is_set():
+            for _, peer_client in self._peers:
+                try:
+                    payload = json.dumps({"command": "ping"}).encode("utf-8")
+                    start = time.time()
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                        sock.settimeout(1.0)
+                        sock.sendto(payload, (peer_client.ip_address, peer_client.port))
+                        data, _ = sock.recvfrom(4096)
+                    ping_ms = max((time.time() - start) * 1000.0, 0.0)
+                    try:
+                        data_msg = json.loads(data.decode("utf-8"))
+                        if data_msg.get("command") == "pong":
+                            peer_client.ping_ms = ping_ms
+                        else:
+                            peer_client_id = peer_client.peer_client_id
+                            if peer_client_id not in missed_pong.keys():
+                                missed_pong[peer_client_id] = 0
+                            else:
+                                missed_pong[peer_client_id] += 1
+
+                            missed_pong_limit = os.getenv("TC_PONG_MISS_LIMIT", 5)
+                            if missed_pong[peer_client_id] == missed_pong_limit:
+                                logger.info(f"Missing pong from {peer_client_id} {missed_pong_limit} times, dropping from peer list")
+                                self._peers = {key: value for key, value in self._peers.items() if key != peer_client_id}
+                                missed_pong = {key: value for key, value in self._peers.items() if key != peer_client_id}
+
+                    except Exception as exc:
+                        raise RuntimeError(f"Invalid ping response from {peer_client.ip_address}:{peer_client.port}: {exc}")
+                except Exception as exc:
+                    logger.error
+    
+    def _run_ping(self)-> None:
+        if self._thread_ping and self._thread_ping.is_alive():
+            return
+        self._thread_ping = threading.Thread(target=self._ping_loop, name="ping-peer", daemon=True)
+        self._thread_ping.start()
+
+
+    # UDP handling
+    #-------------------------------------------------------
+    def _udp_discover(self):
+        payload = json.dumps(
+            {
+                "command": "D001",
+                "peer_client_id": self.peer_client_id
+        }).encode("utf-8")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(0.5)
             sock.sendto(payload, ("<broadcast>", self.port))
+        except Exception as err:
+            logger.error(f"Error discovering local UDP peers {err}")
+            raise
+
+        with closing(sock):
             while True:
+                logger.info(f"Discovering peers @ {self.port}")
                 try:
                     data, addr = sock.recvfrom(4096)
                 except socket.timeout:
                     break
                 try:
                     udp_peer_info = json.loads(data.decode("utf-8"))
-                    udp_peer_client = PeerClient(
-                        udp_peer_info.get("peer_client_id"),
-                        udp_peer_info.get("ip_address"),
-                        udp_peer_info.get("port"),
-                        udp_peer_info.get("tg_device", "CPU"),
-                        udp_peer_info.get("shard", None)
-                    )
-
-                    self._peers[udp_peer_client.peer_client_id] = udp_peer_client
+                    if udp_peer_info["command"] == "D002":
+                        udp_client_id = udp_peer_info.get("peer_client_id")
+                        if udp_client_id is not None:
+                            if udp_client_id not in self._peers.keys():
+                                logger.info(f"New peer discovered @ {addr}.")
+                                logger.info(f"Adding peer {udp_client_id}")
+                                self.add_peer(udp_peer_info)
                 except Exception:
                     continue
-        except Exception:
-            logger.error("Error discovering local UDP peers", exc_info=True)
-            yield
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
 
-    def _ping_peer_udp(self, peer: CDevice) -> dict:
-        payload = json.dumps({"command": "ping"}).encode("utf-8")
-        start = time.time()
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(1.0)
-            sock.sendto(payload, (peer.ip_address, peer.port))
-            data, _ = sock.recvfrom(4096)
-        ping_ms = max((time.time() - start) * 1000.0, 0.0)
-        try:
-            data_msg = json.loads(data.decode("utf-8"))
-            if data_msg.get("command") == "pong":
-                peer.ping_ms = ping_ms
-        except Exception as exc:
-            raise RuntimeError(f"Invalid ping response from {peer.ip_address}:{peer.port}: {exc}")
-
-    # UDP responder -------------------------------------------------------
-    def _start_udp_responder(self) -> None:
-        if self._udp_thread and self._udp_thread.is_alive():
+    def _run_udp_discover(self) -> None:
+        if self._thread_udp_discovery and self._thread_udp_discovery.is_alive():
             return
-        self._udp_stop.clear()
-        self._udp_thread = threading.Thread(target=self._udp_loop, name="udp-responder", daemon=True)
-        self._udp_thread.start()
+        self._thread_udp_discovery = threading.Thread(target=self._udp_discover, name="udp-discover", daemon=True)
+        self._thread_udp_discovery.start()
 
-    def _udp_loop(self) -> None:
+    def _udp_response(self) -> None:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", self.port))
             sock.settimeout(0.5)
-        except Exception:
-            return
+        except Exception as err:
+            logger.error(f"Failed UDP response: {err}")
+            raise
 
         with closing(sock):
-            while not self._udp_stop.is_set():
+            while True:
+                logger.info(f"Broadcasting client {self.peer_client_id} @ {self.address}:{self.port}")
                 try:
-                    data, _ = sock.recvfrom(4096)
-                    if not data:
-                        continue
+                    try:
+                        data, addr = sock.recvfrom(4096)
+                    except socket.timeout:
+                        break
                     
                     msg = json.loads(data.decode("utf-8"))
-                    if msg.get("command") == "D001":
+                    if msg.get("command") == "D001" and msg.get("peer_client_id") != self.peer_client_id:
                         response = self.as_dict()
                         response["command"] = "D002"
                         resp_data = json.dumps(response).encode("utf-8")
-                        sock.sendto(resp_data, _)
+                        logger.info(f"Responding to D001 from {addr}")
+                        sock.sendto(resp_data, addr)
                         
                 except (socket.timeout, UnicodeDecodeError, json.JSONDecodeError):
                     continue
@@ -266,10 +304,32 @@ class PeerClient:
                     if self._udp_stop.is_set():
                         break
 
-    def add_peer(self, host: str, port: int) -> CDevice:
-        peer = CDevice(host, port)
-        self._peers[peer.peer_client_id] = peer
-        return peer
+    def _run_udp_response(self) -> None:
+        if self._thread_udp_brodcast and self._thread_udp_brodcast.is_alive():
+            return
+        self._thread_udp_brodcast = threading.Thread(target=self._udp_response, name="udp-responder", daemon=True)
+        self._thread_udp_brodcast.start()
+
+    def add_peer(self, peer_data: dict) -> None:
+        cdvice = CDevice(
+            peer_data.get("peer_client_id", None),
+            peer_data.get("ip_address", "0.0.0.0"),
+            peer_data.get("port", self.port),
+            peer_data.get("tg_device", "CPU")
+        )
+
+        peer_client = PeerClient(
+            peer_data.get("peer_client_id"),
+            peer_data.get("ip_address", "0.0.0.0"),
+            peer_data.get("port", self.port),
+            cdvice,
+            Shard(
+                peer_data["shard"].get("model_name"),
+                peer_data["shard"].get("start_layer"),
+                peer_data["shard"].get("end_layer")
+            ),
+        )
+        self._peers[peer_client.peer_client_id] = peer_client
 
     def as_dict(self) -> dict:
         return {
