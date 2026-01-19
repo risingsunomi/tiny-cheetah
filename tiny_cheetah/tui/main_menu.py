@@ -63,9 +63,9 @@ class MainMenu(App):
         if button_id == "chat-btn":
             defaults = getattr(self, "training_defaults", {}) or {}
             default_model = self.chat_default or defaults.get("model-id") or defaults.get("custom-model-id")
-            self.push_screen(ChatScreen(default_model=default_model, offline=self.offline_mode))
+            self.push_screen(ChatScreen(default_model=default_model, offline=self.offline_mode, peer_client=self._peer_client))
         elif button_id == "train-btn":
-            screen = TrainScreen(peer_manager=self._peer_client, offline_mode=self.offline_mode)
+            screen = TrainScreen(peer_client=self._peer_client, offline_mode=self.offline_mode)
             defaults = getattr(self, "training_defaults", None)
             if defaults:
                 screen.apply_default_settings(defaults)

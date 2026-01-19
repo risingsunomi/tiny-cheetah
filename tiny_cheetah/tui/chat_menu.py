@@ -65,7 +65,7 @@ class ChatScreen(Screen[None]):
         ("ctrl+n", "open_orchestration", "Network Nodes")
     ]
 
-    def __init__(self, default_model: str | None = None, offline: bool = False) -> None:
+    def __init__(self, peer_client: PeerClient, default_model: str | None = None, offline: bool = False) -> None:
         super().__init__()
         self._offline = offline
         self._chat_log: Optional[RichLog] = None
@@ -86,7 +86,7 @@ class ChatScreen(Screen[None]):
         self._chat_log_list: Optional[ListView] = None
         self._log_storage = ChatLogStorage()
         self._current_log_id: Optional[int] = None
-        self._peer_client = PeerClient()
+        self._peer_client = peer_client
         self._peer_label: Optional[Label] = None
 
     def compose(self) -> ComposeResult:
