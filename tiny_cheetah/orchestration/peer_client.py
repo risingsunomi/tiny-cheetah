@@ -324,7 +324,7 @@ class PeerClient:
                         response["command"] = "D002"
                         resp_data = json.dumps(response).encode("utf-8")
                         logger.info(f"Responding to D001 from {addr}")
-                        sock.sendto(resp_data, addr)
+                        sock.sendto(resp_data, (addr[0], self.port))
                         
                 except Exception as err:
                     continue
