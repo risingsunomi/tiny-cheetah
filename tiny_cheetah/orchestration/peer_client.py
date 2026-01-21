@@ -237,6 +237,24 @@ class PeerClient:
                 "command": "D001",
                 "peer_client_id": self.peer_client_id
         }).encode("utf-8")
+        unicast_targets = os.getenv("TC_PEER_UNICAST_TARGETS", "")
+        targets: list[tuple[str, int]] = []
+        if unicast_targets:
+            for entry in unicast_targets.split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                if ":" in entry:
+                    host, port_str = entry.rsplit(":", 1)
+                    try:
+                        port = int(port_str)
+                    except ValueError:
+                        logger.warning("Invalid unicast target port: %s", entry)
+                        continue
+                else:
+                    host = entry
+                    port = self.port
+                targets.append((host, port))
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -250,6 +268,8 @@ class PeerClient:
                 logger.info(f"Discovering peers @ {self.port}")
                 try:
                     sock.sendto(payload, ("<broadcast>", self.port))
+                    for host, port in targets:
+                        sock.sendto(payload, (host, port))
                 except Exception as err:
                     logger.error(f"Error broadcasting discovery packet: {err}")
                     time.sleep(1.0)
@@ -266,7 +286,8 @@ class PeerClient:
                         if udp_peer_info["command"] == "D002":
                             udp_client_id = udp_peer_info.get("peer_client_id")
                             if udp_client_id is not None:
-                                if udp_client_id not in self._peers.keys():
+                                if udp_client_id != self.peer_client_id and udp_client_id not in self._peers.keys():
+                                    logger.info("UDP discovery response from %s: %s", addr, udp_peer_info)
                                     logger.info(f"New peer discovered @ {addr}.")
                                     logger.info(f"Adding peer {udp_client_id}")
                                     self.add_peer(udp_peer_info)
@@ -298,6 +319,7 @@ class PeerClient:
                     data, addr = sock.recvfrom(4096)
                     msg = json.loads(data.decode("utf-8"))
                     if msg.get("command") == "D001" and msg.get("peer_client_id") != self.peer_client_id:
+                        logger.info("UDP discovery request from %s: %s", addr, msg)
                         response = self.as_dict()
                         response["command"] = "D002"
                         resp_data = json.dumps(response).encode("utf-8")
