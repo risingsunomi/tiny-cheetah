@@ -241,7 +241,6 @@ class PeerClient:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(0.1)
-            sock.sendto(payload, ("<broadcast>", self.port))
         except Exception as err:
             logger.error(f"Error discovering local UDP peers {err}")
             raise
@@ -250,17 +249,31 @@ class PeerClient:
             while not self.stop_udp_discovery:
                 logger.info(f"Discovering peers @ {self.port}")
                 try:
-                    data, addr = sock.recvfrom(4096)
-                    udp_peer_info = json.loads(data.decode("utf-8"))
-                    if udp_peer_info["command"] == "D002":
-                        udp_client_id = udp_peer_info.get("peer_client_id")
-                        if udp_client_id is not None:
-                            if udp_client_id not in self._peers.keys():
-                                logger.info(f"New peer discovered @ {addr}.")
-                                logger.info(f"Adding peer {udp_client_id}")
-                                self.add_peer(udp_peer_info)
+                    sock.sendto(payload, ("<broadcast>", self.port))
                 except Exception as err:
+                    logger.error(f"Error broadcasting discovery packet: {err}")
+                    time.sleep(1.0)
                     continue
+
+                while not self.stop_udp_discovery:
+                    try:
+                        data, addr = sock.recvfrom(4096)
+                    except socket.timeout:
+                        break
+                    
+                    try:
+                        udp_peer_info = json.loads(data.decode("utf-8"))
+                        if udp_peer_info["command"] == "D002":
+                            udp_client_id = udp_peer_info.get("peer_client_id")
+                            if udp_client_id is not None:
+                                if udp_client_id not in self._peers.keys():
+                                    logger.info(f"New peer discovered @ {addr}.")
+                                    logger.info(f"Adding peer {udp_client_id}")
+                                    self.add_peer(udp_peer_info)
+                    except Exception:
+                        continue
+                
+                time.sleep(1.0)
 
     def _run_udp_discover(self) -> None:
         if self._thread_udp_discovery and self._thread_udp_discovery.is_alive():
