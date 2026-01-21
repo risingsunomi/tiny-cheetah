@@ -26,7 +26,7 @@ class PeerClient:
         self.peer_client_id = os.getenv("TC_PEER_ID") or f"cheetah-{uuid.uuid4().hex[:6]}"
         self.address = "0.0.0.0"
         self.port = int(os.getenv("TC_PORT", "8765"))
-        self.peer_info = CDevice(
+        self.peer_device = CDevice(
             self.peer_client_id,
             self.address,
             self.port,
@@ -37,7 +37,9 @@ class PeerClient:
         self.stop_ping: bool = False
         self.stop_udp_discovery = False
         self.stop_udp_broadcast = False
-        self._peers: Dict[str, PeerClient] = {self.peer_client_id: self.peer_info}
+        self._peers: Dict[str, PeerClient] = {
+            self.peer_client_id: self.peer_device
+        }
         self._lock = threading.RLock()
         self._thread_ping: Optional[threading.Thread] = None        
         self._thread_udp_discovery: Optional[threading.Thread] = None        
@@ -129,7 +131,7 @@ class PeerClient:
 
     # Discovery -----------------------------------------------------------
     def discover_peers(self) -> None:
-        self._peers = {self.peer_client_id: self.peer_info}
+        self._peers = {self.peer_client_id: self.peer_device}
 
         # UDP broadcast
         for info in self._udp_discover():
@@ -340,18 +342,35 @@ class PeerClient:
         self._thread_udp_brodcast.start()
 
     def add_peer(self, peer_data: dict) -> None:
-        cdvice = CDevice(
-            peer_data.get("peer_client_id", None),
-            peer_data.get("ip_address", "0.0.0.0"),
-            peer_data.get("port", self.port),
-            peer_data.get("tg_device", "CPU")
-        )
+        peer_device = peer_data.get("peer_device")
+        if peer_device is None:
+            cdevice = CDevice(
+                peer_data.get("peer_client_id", None),
+                peer_data.get("ip_address", "0.0.0.0"),
+                peer_data.get("port", self.port),
+                get_self_info=False
+            )
+        else:
+            cdevice = CDevice(
+                peer_device.get("peer_client_id", None),
+                peer_device.get("ip_address", "0.0.0.0"),
+                peer_device.get("port", self.port),
+                get_self_info=False
+            )
+
+            cdevice.cpu_model = peer_device.get("cpu_model")
+            cdevice.cpu_proc_speed = peer_device.get("cpu_proc_speed")
+            cdevice.cpu_cores = peer_device.get("cpu_cores")
+            cdevice.cpu_ram = peer_device.get("cpu_ram")
+            cdevice.gpu_model = peer_device.get("gpu_model")
+            cdevice.gpu_vram = peer_device.get("gpu_vram")
+            cdevice.gpu_flops = peer_device.get("gpu_flops")
 
         peer_client = PeerClient(
             peer_data.get("peer_client_id"),
             peer_data.get("ip_address", "0.0.0.0"),
             peer_data.get("port", self.port),
-            cdvice,
+            cdevice,
             Shard(
                 peer_data["shard"].get("model_name"),
                 peer_data["shard"].get("start_layer"),
@@ -371,7 +390,7 @@ class PeerClient:
                 "start_layer": self.shard.start_layer,
                 "end_layer": self.shard.end_layer,
             },
-            "peer_info": self.peer_info.as_dict()
+            "peer_device": self.peer_device.as_dict()
         }
 
 def _to_float(val: Any) -> float:
