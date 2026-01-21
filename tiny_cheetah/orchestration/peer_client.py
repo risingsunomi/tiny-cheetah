@@ -363,7 +363,7 @@ class PeerClient:
     def as_dict(self) -> dict:
         return {
             "peer_client_id": self.peer_client_id,
-            "ip_address": self.ip_address,
+            "ip_address": self.address,
             "port": self.port,
             "tg_device": self.tg_device,
             "shard": {
