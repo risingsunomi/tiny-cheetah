@@ -32,6 +32,7 @@ class OrchestrationScreen(Screen[None]):
         super().__init__()
         self._peer_client = peer_client
         self._summary_panel: Optional[Static] = None
+        self._peer_summary_panel: Optional[Static] = None
         self._peer_panel: Optional[Static] = None
         self._hostmap_panel: Optional[Static] = None
         self._refresh_label: Optional[Label] = None
@@ -44,6 +45,9 @@ class OrchestrationScreen(Screen[None]):
                 local_panel = Static(self._local_node_text(), id="orch-local")
                 self._summary_panel = local_panel
                 yield local_panel
+                peer_summary_panel = Static(self._peer_summary_text(), id="orch-peer-summary")
+                self._peer_summary_panel = peer_summary_panel
+                yield peer_summary_panel
             with Container(id="orch-right"):
                 network_panel = Static(self._network_map_text(), id="orch-network")
                 self._peer_panel = network_panel
@@ -53,6 +57,7 @@ class OrchestrationScreen(Screen[None]):
     async def on_mount(self) -> None:
         await asyncio.to_thread(self._get_peer_count)
         self.set_interval(5.0, self._get_peer_count)
+        self.set_interval(30.0, self._refresh_panels)
 
     # Textual actions ---------------------------------------------------------
     def action_refresh_panels(self) -> None:
@@ -71,6 +76,8 @@ class OrchestrationScreen(Screen[None]):
         self._last_refresh = time.time()
         if self._summary_panel is not None:
             self._summary_panel.update(self._local_node_text())
+        if self._peer_summary_panel is not None:
+            self._peer_summary_panel.update(self._peer_summary_text())
         if self._peer_panel is not None:
             self._peer_panel.update(self._network_map_text())
         if self._refresh_label is not None:
@@ -158,11 +165,36 @@ class OrchestrationScreen(Screen[None]):
         for peer in ordered:
             flops = _flops_value(peer)
             flops_label = f"{flops:.1f} TFLOPS" if flops else "-- TFLOPS"
-            ring_lines.append("")
-            ring_lines.append(f"    🖥️    {_status(peer)}")
-            ring_lines.append(_host_label(peer))
-            ring_lines.append(flops_label)
+            ring_lines.append("🖥️")
+            ring_lines.append(f"{_host_label(peer)} {flops_label} {_status(peer)}")
         return "\n".join(ring_lines)
+
+    def _peer_summary_text(self) -> str:
+        peers = self._peer_client.get_peers(include_self=False)
+        if not peers:
+            return "\n".join(
+                [
+                    "[b]Remote Nodes[/]",
+                    "No remote peers yet.",
+                ]
+            )
+
+        lines = ["[b]Remote Nodes[/]"]
+        for peer in peers:
+            host = str(getattr(peer, "ip_address", "") or getattr(peer, "address", "")).strip()
+            if host in {"", "0.0.0.0"}:
+                host = str(getattr(peer, "peer_client_id", "peer"))
+            flops = getattr(peer, "gpu_flops", 0.0) or 0.0
+            flops_label = f"{flops:.1f} TFLOPS" if flops else "-- TFLOPS"
+            cpu_model = str(getattr(peer, "cpu_model", "") or "Unknown CPU")
+            cpu_cores = int(getattr(peer, "cpu_cores", 0) or 0)
+            cpu_ram = str(getattr(peer, "cpu_ram", "") or "0")
+            gpu_model = str(getattr(peer, "gpu_model", "") or "Unknown GPU")
+            gpu_vram = str(getattr(peer, "gpu_vram", "") or "0")
+            lines.append(f"{host} {flops_label}")
+            lines.append(f"CPU: {cpu_model} ({cpu_cores} cores, {cpu_ram} GB)")
+            lines.append(f"GPU: {gpu_model} ({gpu_vram} VRAM)")
+        return "\n".join(lines)
     
     
 

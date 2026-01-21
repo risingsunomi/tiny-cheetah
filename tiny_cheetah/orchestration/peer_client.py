@@ -37,7 +37,7 @@ class PeerClient:
         self.stop_ping: bool = False
         self.stop_udp_discovery = False
         self.stop_udp_broadcast = False
-        self._peers: Dict[str, PeerClient] = {
+        self._peers: Dict[str, CDevice] = {
             self.peer_client_id: self.peer_device
         }
         self._lock = threading.RLock()
@@ -152,32 +152,30 @@ class PeerClient:
 
         return sorted(peers, key=capacity, reverse=True)
 
-    def _build_peer_from_info(self, info: dict) -> Optional[PeerClient]:
+    def _build_peer_from_info(self, info: dict) -> Optional[CDevice]:
         peer_client_id = info.get("peer_client_id")
         if not peer_client_id:
             return None
 
         shard_info = info.get("shard", {}) if isinstance(info.get("shard"), dict) else {}
-        shard = Shard(
-            shard_info.get("model_name", ""),
-            int(shard_info.get("start_layer", 0) or 0),
-            int(shard_info.get("end_layer", 0) or 0),
-            int(shard_info.get("total_layers", shard_info.get("end_layer", 0)) or 0),
-        )
         peer = CDevice(
             peer_client_id,
             info.get("ip_address", info.get("address", "")),
             int(info.get("port", self.port)),
-            shard,
-            in_use=False,
             tg_device=str(info.get("tg_device", "CPU")),
+        )
+        peer.shard = Shard(
+            shard_info.get("model_name", ""),
+            int(shard_info.get("start_layer", 0) or 0),
+            int(shard_info.get("end_layer", 0) or 0),
+            int(shard_info.get("total_layers", shard_info.get("end_layer", 0)) or 0),
         )
         peer.cpu_model = str(info.get("cpu_model", ""))
         peer.gpu_model = str(info.get("gpu_model", ""))
         peer.gpu_vram = str(info.get("gpu_vram", ""))
         peer.gpu_flops = float(info.get("gpu_flops", 0.0) or 0.0)
 
-        return PeerClient(peer)
+        return peer
 
     # Ping handling
     # --------------------------------
@@ -279,7 +277,7 @@ class PeerClient:
                             if udp_client_id is not None:
                                 if udp_client_id != self.peer_client_id and udp_client_id not in self._peers.keys():
                                     logger.info("UDP discovery response from %s: %s", addr, udp_peer_info)
-                                    logger.info(f"Current peer list: {self._peers.keys()}")
+                                    logger.info(f"Current peer list: {self._peers}")
                                     logger.info(f"New peer discovered @ {addr}.")
                                     logger.info(f"Adding peer {udp_client_id}")
                                     self.add_peer(udp_peer_info)
@@ -332,42 +330,49 @@ class PeerClient:
         self._thread_udp_brodcast.start()
 
     def add_peer(self, peer_data: dict) -> None:
-        peer_device = peer_data.get("peer_device")
-        if peer_device is None:
-            cdevice = CDevice(
-                peer_data.get("peer_client_id", None),
-                peer_data.get("ip_address", "0.0.0.0"),
-                peer_data.get("port", self.port),
-                get_self_info=False
-            )
-        else:
-            cdevice = CDevice(
-                peer_device.get("peer_client_id", None),
-                peer_device.get("ip_address", "0.0.0.0"),
-                peer_device.get("port", self.port),
-                get_self_info=False
-            )
+        try:
+            peer_device = peer_data.get("peer_device")
+            peer_client_id = str(peer_data.get("peer_client_id", "") or "")
+            if not peer_client_id:
+                logger.warning("Skipped peer with missing peer_client_id: %s", peer_data)
+                return
 
-            cdevice.cpu_model = peer_device.get("cpu_model")
-            cdevice.cpu_proc_speed = peer_device.get("cpu_proc_speed")
-            cdevice.cpu_cores = peer_device.get("cpu_cores")
-            cdevice.cpu_ram = peer_device.get("cpu_ram")
-            cdevice.gpu_model = peer_device.get("gpu_model")
-            cdevice.gpu_vram = peer_device.get("gpu_vram")
-            cdevice.gpu_flops = peer_device.get("gpu_flops")
+            if peer_device is None:
+                cdevice = CDevice(
+                    peer_client_id,
+                    peer_data.get("address", "0.0.0.0"),
+                    peer_data.get("port", self.port)
+                )
+            else:
+                cdevice = CDevice(
+                    peer_device.get("peer_client_id", peer_client_id),
+                    peer_device.get("ip_address", peer_data.get("address", "0.0.0.0")),
+                    peer_device.get("port", peer_data.get("port", self.port)),
+                    peer_device.get("tg_device", "CPU"),
+                )
 
-        peer_client = PeerClient(
-            peer_data.get("peer_client_id"),
-            peer_data.get("ip_address", "0.0.0.0"),
-            peer_data.get("port", self.port),
-            cdevice,
-            Shard(
-                peer_data["shard"].get("model_name"),
-                peer_data["shard"].get("start_layer"),
-                peer_data["shard"].get("end_layer")
-            ),
-        )
-        self._peers[peer_client.peer_client_id] = peer_client
+                cdevice.cpu_model = peer_device.get("cpu_model", "")
+                cdevice.cpu_proc_speed = peer_device.get("cpu_proc_speed", "")
+                cdevice.cpu_cores = peer_device.get("cpu_cores", 0)
+                cdevice.cpu_ram = peer_device.get("cpu_ram", "")
+                cdevice.gpu_model = peer_device.get("gpu_model", "")
+                cdevice.gpu_vram = peer_device.get("gpu_vram", "")
+                cdevice.gpu_flops = float(peer_device.get("gpu_flops", 0.0) or 0.0)
+
+            shard_data = peer_data.get("shard", {}) if isinstance(peer_data.get("shard"), dict) else {}
+            cdevice.shard = Shard(
+                shard_data.get("model_name", ""),
+                shard_data.get("start_layer", 0),
+                shard_data.get("end_layer", 0),
+                shard_data.get("total_layers", shard_data.get("end_layer", 0)),
+            )
+            cdevice.ip_address = peer_data.get("address", cdevice.ip_address)
+            cdevice.port = peer_data.get("port", cdevice.port)
+
+            self._peers[peer_client_id] = cdevice
+            logger.info("Added peer %s to peer list", peer_client_id)
+        except Exception as err:
+            logger.error(f"Failed to add peer to list: {err}")
 
     def as_dict(self) -> dict:
         return {
@@ -377,7 +382,7 @@ class PeerClient:
             "shard": {
                 "model_name": self.shard.model_name,
                 "start_layer": self.shard.start_layer,
-                "end_layer": self.shard.end_layer,
+                "end_layer": self.shard.end_layer
             },
             "peer_device": self.peer_device.as_dict()
         }
