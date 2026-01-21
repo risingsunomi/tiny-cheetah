@@ -320,11 +320,15 @@ class PeerClient:
                     msg = json.loads(data.decode("utf-8"))
                     if msg.get("command") == "D001" and msg.get("peer_client_id") != self.peer_client_id:
                         logger.info("UDP discovery request from %s: %s", addr, msg)
-                        response = self.as_dict()
-                        response["command"] = "D002"
-                        resp_data = json.dumps(response).encode("utf-8")
-                        logger.info(f"Responding to D001 from {addr}")
-                        sock.sendto(resp_data, (addr[0], self.port))
+                        try:
+                            response = self.as_dict()
+                            response["command"] = "D002"
+                            resp_data = json.dumps(response).encode("utf-8")
+                            logger.info(f"Responding to D001 from {addr}")
+                            sock.sendto(resp_data, (addr[0], self.port))
+                        except Exception as err:
+                            logger.error(f"Error responding to request: {err}")
+                            continue
                         
                 except Exception as err:
                     continue
