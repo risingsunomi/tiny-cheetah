@@ -6,7 +6,7 @@
 █  ████  ██  ████  ██  ████████  ███████████  █████        ██  ████  █
 ██      ███  ████  ██        ██        █████  █████  ████  ██  ████  █
 ```
-Fast local training and inference using Tinygrad.
+[tinygrad](https://tinygrad.org/) based distributed learning and inference
 
 ![main interface 10272025](media/main_10272025.png "main 10272025")
 
