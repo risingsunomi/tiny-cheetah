@@ -327,7 +327,7 @@ class PeerClient:
                             response["command"] = "D002"
                             resp_data = json.dumps(response).encode("utf-8")
                             logger.info(f"Responding to D001 from {addr}")
-                            sock.sendto(resp_data, (addr[0], self.port))
+                            sock.sendto(resp_data, addr)
                         except Exception as err:
                             logger.error(f"Error responding to request: {err}")
                             continue
@@ -382,9 +382,8 @@ class PeerClient:
     def as_dict(self) -> dict:
         return {
             "peer_client_id": self.peer_client_id,
-            "ip_address": self.address,
+            "address": self.address,
             "port": self.port,
-            "tg_device": self.tg_device,
             "shard": {
                 "model_name": self.shard.model_name,
                 "start_layer": self.shard.start_layer,
