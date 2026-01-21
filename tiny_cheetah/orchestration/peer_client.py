@@ -129,17 +129,6 @@ class PeerClient:
             return address
         return self.address, self.port
 
-    # Discovery -----------------------------------------------------------
-    def discover_peers(self) -> None:
-        self._peers = {self.peer_client_id: self.peer_device}
-
-        # UDP broadcast
-        for info in self._udp_discover():
-            peer = self._build_peer_from_info(info)
-            if peer is None or peer.peer_client_id == self.peer_client_id:
-                continue
-            self._peers[peer.peer_client_id] = peer
-
     # Connections ---------------------------------------------------------
     def get_peers(self, include_self: bool = False) -> List[CDevice]:
         if include_self:
@@ -290,6 +279,7 @@ class PeerClient:
                             if udp_client_id is not None:
                                 if udp_client_id != self.peer_client_id and udp_client_id not in self._peers.keys():
                                     logger.info("UDP discovery response from %s: %s", addr, udp_peer_info)
+                                    logger.info(f"Current peer list: {self._peers.keys()}")
                                     logger.info(f"New peer discovered @ {addr}.")
                                     logger.info(f"Adding peer {udp_client_id}")
                                     self.add_peer(udp_peer_info)

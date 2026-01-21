@@ -88,7 +88,7 @@ class OrchestrationScreen(Screen[None]):
                 self.app.sub_title = new_title
 
     def _local_node_text(self) -> str:
-        host_info = self._peer_client.peer_info.as_dict()
+        host_info = self._peer_client.peer_device.as_dict()
         peer_in_use = self._peer_client.in_use
         status = "[green]● Online[/]" if not peer_in_use else "[red]● Busy[/]"
         cpu_model = host_info.get("cpu_model", "Unknown CPU")
@@ -135,8 +135,8 @@ class OrchestrationScreen(Screen[None]):
 
         def _flops_value(peer) -> float:
             flops = getattr(peer, "gpu_flops", 0.0) or 0.0
-            if not flops and hasattr(peer, "peer_info"):
-                flops = getattr(peer.peer_info, "gpu_flops", 0.0) or 0.0
+            if not flops and hasattr(peer, "peer_device"):
+                flops = getattr(peer.peer_device, "gpu_flops", 0.0) or 0.0
             hw = getattr(peer, "device_report", None)
             if not flops and isinstance(hw, dict):
                 devices = hw.get("devices", []) or hw.get("gpus", [])
@@ -153,7 +153,7 @@ class OrchestrationScreen(Screen[None]):
 
         ring_lines = ["[b]Peers[/]"]
         ordered = [p for p in peers if p.peer_client_id != self._peer_client.peer_client_id]
-        ordered.insert(0, self._peer_client.peer_info)  # self first in ring
+        ordered.insert(0, self._peer_client.peer_device)  # self first in ring
 
         for peer in ordered:
             flops = _flops_value(peer)
