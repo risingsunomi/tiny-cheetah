@@ -49,7 +49,7 @@ class MainMenu(App):
             yield Button("Quit", id="quit-btn")
 
     async def on_mount(self) -> None:
-        self.title="[tiny-cheetah] v0.1"
+        self.title="[Nodes: 1]"
         if self.offline_mode:
             self.title += " [offline]"
         await asyncio.to_thread(self._get_peer_count)
@@ -84,6 +84,6 @@ class MainMenu(App):
         count = self._peer_client.peer_count()
         if count > 1:
             current = getattr(self.app, "sub_title", "")
-            new_title = f"Host Dashboard · Active Nodes {count}"
+            new_title = f"[Nodes: {count}]"
             if new_title != current:
                 self.app.sub_title = new_title
