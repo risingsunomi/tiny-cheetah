@@ -17,7 +17,7 @@ from rich.markup import escape
 
 from tiny_cheetah.models.llm.helpers import load_model
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.tui.helpers import streaming_generate
+from tiny_cheetah.tui.helpers import streaming_generate_with_peers
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
@@ -67,26 +67,27 @@ class ChatScreen(Screen[None]):
 
     def __init__(self, peer_client: PeerClient, default_model: str | None = None, offline: bool = False) -> None:
         super().__init__()
-        self._offline = offline
-        self._chat_log: Optional[RichLog] = None
-        self._input: Optional[Input] = None
-        self._model_id = default_model or ""
-        self._tok_stats = 0.0
-        self._stats_label: Optional[Label] = None
-        self._model_label: Optional[Label] = None
+        self._peer_client: PeerClient = peer_client
+        self._offline: bool = offline
+        self._model_id: str = default_model or ""
+        self._tok_stats: float = 0.0
         self._model: Optional[Model] = None
         self._model_config: Optional[object] = None
         self._tokenizer: Optional[AutoTokenizer] = None
         self._model_cache_path: Optional[Path] = None
         self._history: List[dict[str, str]] = []
-        self._generating_resp = False
+        self._generating_resp: bool = False
         self.out_tokens: List[int] = []
-        self._model_loaded = False
-        self._load_button: Optional[Button] = None
-        self._chat_log_list: Optional[ListView] = None
+        self._model_loaded: bool = False
         self._log_storage = ChatLogStorage()
         self._current_log_id: Optional[int] = None
-        self._peer_client = peer_client
+        
+        self._chat_log: Optional[RichLog] = None
+        self._chat_input: Optional[Input] = None
+        self._stats_label: Optional[Label] = None
+        self._model_label: Optional[Label] = None
+        self._chat_log_list: Optional[ListView] = None
+        self._load_button: Optional[Button] = None
         self._peer_label: Optional[Label] = None
 
     def compose(self) -> ComposeResult:
@@ -129,9 +130,9 @@ class ChatScreen(Screen[None]):
 
     async def on_mount(self, _: Mount) -> None:
         self._chat_log = self.query_one("#chat-log", RichLog)
-        self._input = self.query_one("#chat-input", Input)
-        # if self._input is not None:
-        #     self.call_after_refresh(self._input.focus)
+        self._chat_input = self.query_one("#chat-input", Input)
+        # if self._chat_input is not None:
+        #     self.call_after_refresh(self._chat_input.focus)
         if self._model_label is not None:
             self._model_label.update(self._model_id or "<select>")
         await self._initialize_chat_logs()
@@ -149,6 +150,7 @@ class ChatScreen(Screen[None]):
         if event.button.id == "open-model-picker":
             self._open_model_picker()
         elif event.button.id == "load-model":
+            self._chat_input.placeholder = "Loading model..."
             if not self._model_id:
                 self._log_sys_msg("Select a model first.")
                 return
@@ -163,7 +165,8 @@ class ChatScreen(Screen[None]):
             self._set_load_button_enabled(False)
             
             self._log_sys_msg(f"Loading model '{self._model_id}'...")
-            await self._start_model_load()
+            self._start_model_load()
+            self._chat_input.placeholder = ""
         elif event.button.id == "clear-model":
             self._clear_model(persist=True)
         elif event.button.id == "new-chat-log":
@@ -220,7 +223,6 @@ class ChatScreen(Screen[None]):
             if not content:
                 return
             event.input.value = ""
-            event.input.placeholder = "Generating response..."
 
             if self._generating_resp:
                 self._log_sys_msg("Model is generating a response; please wait...")
@@ -239,14 +241,20 @@ class ChatScreen(Screen[None]):
             self._append_user(content)
             self._history.append({"role": "user", "content": content})
 
+            event.input.placeholder = "Generating response..."
             self._generating_resp = True
             self.action_toggle_loading()
             self.refresh()
+            self.call_after_refresh(self._run_generation)
+
+    def _run_generation(self) -> None:
+        try:
             self._generate_response()
+        finally:
             self.action_toggle_loading()
             self._generating_resp = False
-
-            event.input.placeholder = ""
+            if self._chat_input is not None:
+                self._chat_input.placeholder = ""
 
     def _append_user(
         self,
@@ -535,7 +543,7 @@ class ChatScreen(Screen[None]):
             return
         await self._handle_chat_log_load(log_id)
 
-    async def _handle_chat_log_load(self, log_id: int) -> None:
+    def _handle_chat_log_load(self, log_id: int) -> None:
         summary = self._log_storage.get_log(log_id)
         if summary is None:
             self._log_sys_msg("Chat log not found.")
@@ -552,7 +560,7 @@ class ChatScreen(Screen[None]):
             self._model_label.update(self._model_id or "<select>")
         self._restore_messages_to_view(messages, persist=False)
         if self._model_id:
-            await self._start_model_load()
+            self._start_model_load()
         else:
             self._log_sys_msg("No model associated with this log. Select one to continue.")
 
@@ -597,23 +605,20 @@ class ChatScreen(Screen[None]):
             return None
         return self._parse_log_item_id(getattr(widget, "id", None))
 
-    async def _start_model_load(self) -> None:
+    def _start_model_load(self) -> None:
         # loaded_model = self._load_model()
         try:
-            self._model, self._model_config, self._tokenizer, self._model_cache_path, elapsed = await self._load_model()
+            self._model, self._model_config, self._tokenizer, self._model_cache_path, elapsed = self._load_model()
         except Exception as exc:
-            return await self._h_model_load_failure(f"Model load failed: {exc}\n traceback: {traceback.format_exc()}")
+            self._log_sys_msg(f"Model load failed: {exc}\n traceback: {traceback.format_exc()}")
+            self._set_load_button_enabled(True)
+            if self._chat_input is not None:
+                self._chat_input.focus()
         else:
             ready_msg = f"Model ready in {elapsed:.1f}s."
             self._log_sys_msg(ready_msg)
             self._model_loaded = True
             self._set_load_button_enabled(True)
-    
-    async def _h_model_load_failure(self, message: str) -> None:
-        self._log_sys_msg(message)
-        self._set_load_button_enabled(True)
-        if self._input is not None:
-            self._input.focus()
 
     def _log_sys_msg(self, message: str, *, persist: bool = False) -> None:
         self._append_system(message, persist=persist)
@@ -621,9 +626,9 @@ class ChatScreen(Screen[None]):
     async def _log_sys_msg_async(self, message: str) -> Awaitable[None]:
         await asyncio.to_thread(self._append_system, message, persist=False)
 
-    async def _load_model(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
+    def _load_model(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
         start = time.time()
-        model, model_config, tokenizer, model_path = await load_model(
+        model, model_config, tokenizer, model_path = load_model(
             self._model_id,
             None,
             None,
@@ -651,7 +656,9 @@ class ChatScreen(Screen[None]):
         top_p = self._model_config["top_p"]
 
         try:
-            result = streaming_generate(
+            self._peer_client.in_use = True
+            result = streaming_generate_with_peers(
+                self._peer_client,
                 self._model,
                 input_ids,
                 attention_mask,
@@ -662,7 +669,8 @@ class ChatScreen(Screen[None]):
                 top_p,
             )
             if result is None:
-                self._log_sys_msg("streaming_generate returned None.")
+                self._log_sys_msg("streaming_generate_with_peers returned None.")
+            self._peer_client.in_use = False
         except Exception as exc:
             self._log_sys_msg(f"Error during generation: {exc}")
             self._log_sys_msg(f"Traceback: {traceback.format_exc()}")
@@ -716,27 +724,27 @@ class ChatLogNameModal(ModalScreen[Optional[str]]):
         super().__init__(id="chat-log-name-modal")
         self._title = title
         self._initial = initial
-        self._input: Optional[Input] = None
+        self._chat_input: Optional[Input] = None
 
     def compose(self) -> ComposeResult:
         with Container(id="chat-log-name-modal-container"):
             yield Label(self._title, id="chat-log-name-title")
-            self._input = Input(id="chat-log-name-field", placeholder="Enter log name…")
-            yield self._input
+            self._chat_input = Input(id="chat-log-name-field", placeholder="Enter log name…")
+            yield self._chat_input
             with Container(id="chat-log-name-buttons"):
                 yield Button("Cancel", id="chat-log-name-cancel")
                 yield Button("Save", id="chat-log-name-save", variant="primary")
 
     def on_mount(self) -> None:
-        if self._input is not None:
-            self._input.value = self._initial
-            # self.call_after_refresh(self._input.focus)
+        if self._chat_input is not None:
+            self._chat_input.value = self._initial
+            # self.call_after_refresh(self._chat_input.focus)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "chat-log-name-cancel":
             self.dismiss(None)
         elif event.button.id == "chat-log-name-save":
-            value = self._input.value.strip() if self._input else ""
+            value = self._chat_input.value.strip() if self._chat_input else ""
             self.dismiss(value or None)
 
 

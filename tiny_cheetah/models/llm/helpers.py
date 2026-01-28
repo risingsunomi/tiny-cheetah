@@ -318,7 +318,7 @@ def load_model_config(model_path: Path) -> Dict[str, Any]:
     
     return model_config.config
 
-async def load_model(
+def load_model(
     model_id: str,
     shard: Shard = None,
     weight_device: str = os.getenv("TC_DEVICE") or "CPU",
@@ -341,7 +341,7 @@ async def load_model(
     elif resolved_path is None and not offline_mode:
         logger.info("No path resolved to model %s, creating a new path %s and downloading model", model_id, cache_path)
         model_path = cache_path
-        model_path, model_config, _ = await model_repo.download()
+        model_path, model_config, _ = model_repo.download()
     elif offline_mode:
         logger.error("Model %s not found in offline mode", model_id)
         raise FileNotFoundError(f"Model {model_id} not found in offline mode")

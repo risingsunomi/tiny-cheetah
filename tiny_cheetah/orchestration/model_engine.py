@@ -17,12 +17,8 @@ class ModelEngine:
     def __init__(
         self,
         shard: Shard | None = None,
-        node_index: int = 0,
-        ring: Sequence[Any] = (),
     ) -> None:
         self.shard = shard or Shard("local", 0, 0, 0)
-        self.node_index = node_index
-        self.ring = ring
 
     def get_tokens(
         self,

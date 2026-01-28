@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
 import socket
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from contextlib import closing
 import asyncio
 
@@ -37,6 +38,8 @@ class PeerClient:
         self.stop_ping: bool = False
         self.stop_udp_discovery = False
         self.stop_udp_broadcast = False
+        self.stop_tensor_recv = False
+        self._generate_handler: Optional[Callable[[dict], dict]] = None
         self._peers: Dict[str, CDevice] = {
             self.peer_client_id: self.peer_device
         }
@@ -44,50 +47,121 @@ class PeerClient:
         self._thread_ping: Optional[threading.Thread] = None        
         self._thread_udp_discovery: Optional[threading.Thread] = None        
         self._thread_udp_brodcast: Optional[threading.Thread] = None
+        self._thread_tensor_recv: Optional[threading.Thread] = None
+        self._tensor_inbox: queue.Queue[bytes] = queue.Queue()
         
 
         self._run_udp_response()
         self._run_udp_discover()
+        self._run_tensor_receiver()
 
     # Networking ---------------------------------------------------------
-    def send_tensor_bytes(
-        self,
-        tensor_bytes: bytes,
-        address: Tuple[str, int] | None = None
-    ) -> None:
-        """Send raw tensor bytes to a peer; no response expected."""
-        payload = {
-            "command": "tensor_bytes",
-            "payload": {"buffer": base64.b64encode(tensor_bytes).decode("ascii")}
-        }
-        logger.info(f"Sending tensor bytes from peer '{self.peer_client_id}' to {address or (self.address, self.port)}")
-        self._send(payload, expect_reply=False, address=address)
-
     def recv_tensor_bytes(
         self,
         timeout: float = 5.0,
         bind_address: Tuple[str, int] | None = None,
     ) -> bytes:
         """Blocking receive helper; expects peer to initiate a send."""
+        if self._thread_tensor_recv and self._thread_tensor_recv.is_alive():
+            try:
+                return self._tensor_inbox.get(timeout=timeout)
+            except queue.Empty:
+                return b""
+
+        if self.in_use:
+            logger.warning("recv_tensor_bytes called '%s' already in use", self.peer_client_id)
+            logger.info("Try again later")
+            return b""
+
         self.in_use = True
         try:
-            if not self.in_use:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.bind(bind_address or ("0.0.0.0", 0))
-                    sock.settimeout(timeout)
-                    data, _ = sock.recvfrom(65536)
-                    msg = json.loads(data.decode("utf-8"))
-                buf = msg.get("payload", {}).get("buffer", "")
-                self.in_use = False
-                return base64.b64decode(buf)
-            else:
-                logger.warning(f"recv_tensor_bytes called '{self.peer_client_id}' already in use")
-                logger.info("Try again later")        
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.bind(bind_address or ("0.0.0.0", 1045))
+                sock.settimeout(timeout)
+                data, _ = sock.recvfrom(65536)
+                msg = json.loads(data.decode("utf-8"))
+            buf = msg.get("payload", {}).get("buffer", "")
+            return base64.b64decode(buf)
         except Exception:
             logger.exception("Error receiving tensor bytes")
-        
-        self.in_use = False
-        return b""
+            return b""
+        finally:
+            self.in_use = False
+
+    def _tensor_recv_loop(self) -> None:
+        bind = ("0.0.0.0", self.port)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(bind)
+            sock.listen(5)
+            sock.settimeout(0.5)
+        except Exception as err:
+            logger.error("Failed payload receiver: %s", err)
+            return
+
+        with closing(sock):
+            while not self.stop_tensor_recv:
+                try:
+                    conn, addr = sock.accept()
+                except socket.timeout:
+                    continue
+                except Exception:
+                    logger.exception("Error accepting payload connection")
+                    continue
+                with conn:
+                    try:
+                        chunks: list[bytes] = []
+                        while True:
+                            data = conn.recv(65536)
+                            if not data:
+                                break
+                            chunks.append(data)
+                        raw = b"".join(chunks)
+                        if not raw:
+                            continue
+                        msg = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        logger.exception("Error decoding payload")
+                        continue
+
+                    try:
+                        command = msg.get("command")
+                        if command == "tensor_bytes":
+                            buf = msg.get("payload", {}).get("buffer", "")
+                            if buf:
+                                tensor_bytes = base64.b64decode(buf)
+                                self._tensor_inbox.put(tensor_bytes)
+                                logger.info("Received tensor bytes from %s", addr)
+                            self._send_reply(conn, {"ok": True})
+                        elif command == "generate_token":
+                            if self._generate_handler is None:
+                                self._send_reply(conn, {"error": "generate handler not set"})
+                            else:
+                                response = self._generate_handler(msg)
+                                self._send_reply(conn, response)
+                        else:
+                            self._send_reply(conn, {"error": f"unknown command {command}"})
+                    except Exception:
+                        logger.exception("Error handling payload")
+                        continue
+
+    def _run_tensor_receiver(self) -> None:
+        if self._thread_tensor_recv and self._thread_tensor_recv.is_alive():
+            return
+        self._thread_tensor_recv = threading.Thread(
+            target=self._tensor_recv_loop,
+            name="tensor-receiver",
+            daemon=True,
+        )
+        self._thread_tensor_recv.start()
+
+    def _send_reply(self, conn: socket.socket, payload: dict) -> None:
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            conn.sendall(data)
+        except Exception:
+            logger.debug("Failed to send reply payload")
     
     def ping(self, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         try:
@@ -99,6 +173,9 @@ class PeerClient:
 
     def send_payload(self, message: dict, *, expect_reply: bool = True, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         return self._send(message, expect_reply=expect_reply, address=address)
+
+    def set_generate_handler(self, handler: Callable[[dict], dict]) -> None:
+        self._generate_handler = handler
 
     def _send(self, message: dict, expect_reply: bool = True, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         self.in_use = True
@@ -137,9 +214,6 @@ class PeerClient:
 
     def peer_count(self) -> int:
         return len(self._peers)
-
-    def assign_shards(self, model_name: str, total_layers: int) -> None:
-        ModelEngine.plan_shards(self._ordered_peers(), model_name, total_layers)
 
     # Internal ------------------------------------------------------------
     def _ordered_peers(self) -> List[CDevice]:
@@ -247,24 +321,22 @@ class PeerClient:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.settimeout(0.1)
+            sock.settimeout(1.0)
         except Exception as err:
             logger.error(f"Error discovering local UDP peers {err}")
             raise
 
         with closing(sock):
             while not self.stop_udp_discovery:
-                logger.info(f"Discovering peers @ {self.port}")
+                logger.info(f"Broadcasting client {self.peer_client_id} @ {self.address}:{self.port}")
                 try:
                     sock.sendto(payload, ("<broadcast>", self.port))
                     for host, port in targets:
                         sock.sendto(payload, (host, port))
                 except Exception as err:
                     logger.error(f"Error broadcasting discovery packet: {err}")
-                    time.sleep(1.0)
-                    continue
-
-                while not self.stop_udp_discovery:
+                
+                while True:
                     try:
                         data, addr = sock.recvfrom(4096)
                     except socket.timeout:
@@ -281,10 +353,8 @@ class PeerClient:
                                     logger.info(f"New peer discovered @ {addr}.")
                                     logger.info(f"Adding peer {udp_client_id}")
                                     self.add_peer(udp_peer_info)
-                    except Exception:
-                        continue
-                
-                time.sleep(1.0)
+                    except Exception as err:
+                        logger.error(f"Error processing UDP discovery response: {err}")
 
     def _run_udp_discover(self) -> None:
         if self._thread_udp_discovery and self._thread_udp_discovery.is_alive():
@@ -297,14 +367,13 @@ class PeerClient:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", self.port))
-            sock.settimeout(0.5)
+            sock.settimeout(1.0)
         except Exception as err:
             logger.error(f"Failed UDP response: {err}")
             raise
 
         with closing(sock):
             while not self.stop_udp_discovery:
-                logger.info(f"Broadcasting client {self.peer_client_id} @ {self.address}:{self.port}")
                 try:
                     data, addr = sock.recvfrom(4096)
                     msg = json.loads(data.decode("utf-8"))
@@ -318,10 +387,8 @@ class PeerClient:
                             sock.sendto(resp_data, addr)
                         except Exception as err:
                             logger.error(f"Error responding to request: {err}")
-                            continue
-                        
                 except Exception as err:
-                    continue
+                    logger.debug(f"UDP response error: {err}")
 
     def _run_udp_response(self) -> None:
         if self._thread_udp_brodcast and self._thread_udp_brodcast.is_alive():
