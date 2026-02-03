@@ -55,8 +55,8 @@ class MainMenu(App):
         await asyncio.to_thread(self._get_peer_count)
         self.set_interval(5.0, self._get_peer_count)
     
-    def action_pop_screen(self):
-        exit()
+    def action_pop_screen(self) -> None:
+        self.exit()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
