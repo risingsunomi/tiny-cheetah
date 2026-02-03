@@ -125,7 +125,6 @@ def streaming_generate_with_peers(
         peer = peers[step % len(peers)]
         if getattr(peer, "peer_client_id", None) == getattr(peer_client, "peer_client_id", None):
             token, end_token = engine.get_tokens(
-                engine,
                 model,
                 input_list,
                 mask_list,

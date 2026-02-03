@@ -213,9 +213,9 @@ class ChatScreen(Screen[None]):
         count = self._peer_client.peer_count()
         if count > 1:
             current = getattr(self.app, "sub_title", "")
-            new_title = f"Host Dashboard · Active Nodes {count}"
+            new_title = f"[Nodes: {count}]"
             if new_title != current:
-                self.app.sub_title = new_title
+                self.app.title = new_title
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":
@@ -228,8 +228,7 @@ class ChatScreen(Screen[None]):
                 self._log_sys_msg("Model is generating a response; please wait...")
                 return
             if not self._model_loaded:
-                await self._load_model()
-                self._model_loaded = True
+                self._start_model_load()
 
             if self._current_log_id is None:
                 self._log_sys_msg("Create or load a chat log before chatting.")
@@ -243,7 +242,6 @@ class ChatScreen(Screen[None]):
 
             event.input.placeholder = "Generating response..."
             self._generating_resp = True
-            self.action_toggle_loading()
             self.refresh()
             self.call_after_refresh(self._run_generation)
 
@@ -251,7 +249,6 @@ class ChatScreen(Screen[None]):
         try:
             self._generate_response()
         finally:
-            self.action_toggle_loading()
             self._generating_resp = False
             if self._chat_input is not None:
                 self._chat_input.placeholder = ""

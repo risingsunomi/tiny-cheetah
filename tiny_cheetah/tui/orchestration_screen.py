@@ -90,9 +90,8 @@ class OrchestrationScreen(Screen[None]):
         count = self._peer_client.peer_count()
         if count > 1:
             current = getattr(self.app, "sub_title", "")
-            new_title = f"Host Dashboard · Active Nodes {count}"
-            if new_title != current:
-                self.app.sub_title = new_title
+            new_title = f"[Nodes: {count}]"
+            self.app.title = new_title
 
     def _local_node_text(self) -> str:
         host_info = self._peer_client.peer_device.as_dict()

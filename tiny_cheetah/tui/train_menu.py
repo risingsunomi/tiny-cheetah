@@ -648,7 +648,7 @@ class TrainScreen(Screen[None]):
         if self.app is None:
             return
         count = self._peer_client.peer_count()
-        self.app.sub_title = f"Active Nodes {count}"
+        self.app.title = f"[Nodes: {count}]"
 
 
 class TrainSettingsScreen(ModalScreen[Dict[str, object]]):

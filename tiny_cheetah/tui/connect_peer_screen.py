@@ -88,7 +88,5 @@ class ConnectPeerScreen(Screen[None]):
             return
         count = self._peer_client.peer_count()
         if count > 1:
-            current = getattr(self.app, "sub_title", "")
-            new_title = f"Host Dashboard · Active Nodes {count}"
-            if new_title != current:
-                self.app.sub_title = new_title
+            new_title = f"[Nodes: {count}]"
+            self.app.title = new_title

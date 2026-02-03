@@ -83,7 +83,5 @@ class MainMenu(App):
     def _get_peer_count(self) -> None:
         count = self._peer_client.peer_count()
         if count > 1:
-            current = getattr(self.app, "sub_title", "")
             new_title = f"[Nodes: {count}]"
-            if new_title != current:
-                self.app.sub_title = new_title
+            self.app.title = new_title
