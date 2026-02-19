@@ -45,9 +45,14 @@ class Model:
         self,
         x,
         position_ids: tg.Tensor | None=None,
-        attention_mask: tg.Tensor | None=None
+        attention_mask: tg.Tensor | None=None,
+        hidden_state: tg.Tensor | None = None,
     ):
-        x = self.embed_tokens(x)
+        if hidden_state is None:
+            x = self.embed_tokens(x)
+        else:
+            x = hidden_state
+            
         for i in range(self.shard.start_layer, self.shard.end_layer):
             x = self.layers[i](x, attention_mask, position_ids)
 

@@ -40,9 +40,7 @@ class PeerClient:
         self.stop_udp_broadcast = False
         self.stop_tensor_recv = False
         self._generate_handler: Optional[Callable[[dict], dict]] = None
-        self._peers: Dict[str, CDevice] = {
-            self.peer_client_id: self.peer_device
-        }
+        self._peers: Dict[str, CDevice] = {}
         self._lock = threading.RLock()
         self._thread_ping: Optional[threading.Thread] = None        
         self._thread_udp_discovery: Optional[threading.Thread] = None        
@@ -162,14 +160,6 @@ class PeerClient:
             conn.sendall(data)
         except Exception:
             logger.debug("Failed to send reply payload")
-    
-    def ping(self, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
-        try:
-            return self._send({"command": "ping"}, expect_reply=True, address=address)
-        except Exception as exc:
-            logger.error(f"Ping failed: {exc}")
-
-        return {}
 
     def send_payload(self, message: dict, *, expect_reply: bool = True, address: Tuple[str, int] | None = None) -> Dict[str, Any]:
         return self._send(message, expect_reply=expect_reply, address=address)
@@ -195,7 +185,9 @@ class PeerClient:
                 response = sock.recv(65536)
             
                 self.in_use = False
-                return json.loads(response.decode("utf-8"))
+                json_response = json.loads(response.decode("utf-8"))
+                logger.debug(f"Received response from {host}:{port} - {json_response}")
+                return json_response
         except Exception as err:
             self.in_use = False
             logger.error("Invalid response from peer %s: %s", self.peer_client_id, err)
@@ -209,8 +201,8 @@ class PeerClient:
     # Connections ---------------------------------------------------------
     def get_peers(self, include_self: bool = False) -> List[CDevice]:
         if include_self:
-            return list(self._peers.values())
-        return [p for pid, p in self._peers.items() if pid != self.peer_client_id]
+            self._peers[self.peer_client_id] = self.peer_device
+        return self._peers.items()
 
     def peer_count(self) -> int:
         return len(self._peers)
@@ -259,6 +251,7 @@ class PeerClient:
             try:
                 for _, peer_client in self._peers:
                     payload = json.dumps({"command": "ping"}).encode("utf-8")
+                    logger.debug(f"Pinging peer {peer_client.peer_client_id} @ {peer_client.ip_address}:{peer_client.port}")
                     start = time.time()
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                         sock.settimeout(1.0)
@@ -269,12 +262,15 @@ class PeerClient:
                     data_msg = json.loads(data.decode("utf-8"))
                     if data_msg.get("command") == "pong":
                         peer_client.ping_ms = ping_ms
+                        logger.debug(f"Received pong from {peer_client.peer_client_id} - ping {ping_ms:.2f} ms")
                     else:
                         peer_client_id = peer_client.peer_client_id
                         if peer_client_id not in missed_pong.keys():
                             missed_pong[peer_client_id] = 0
                         else:
                             missed_pong[peer_client_id] += 1
+
+                        logger.warning(f"Unexpected ping response from {peer_client.peer_client_id}: {data_msg}")
 
                         missed_pong_limit = os.getenv("TC_PONG_MISS_LIMIT", 5)
                         if missed_pong[peer_client_id] == missed_pong_limit:

@@ -12,7 +12,8 @@ class TransformerBlock:
         self.mlp = MLP(
             config.get("embed_dim"),
             config.get("intermediate_dim"),
-            config.get("hidden_act")
+            config.get("hidden_act"),
+            config.get("mlp_bias", True),
         )
         self.self_attn = MultiHeadAttention(
             config=config,

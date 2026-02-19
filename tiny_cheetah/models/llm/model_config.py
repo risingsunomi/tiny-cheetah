@@ -10,6 +10,9 @@ import os
 import tinygrad as tg
 from tinygrad import dtypes
 
+from tiny_cheetah.logging_utils import get_logger
+logger = get_logger(__name__)
+
 class ModelConfig:
     def __init__(self):
         self.config = {}
@@ -47,12 +50,13 @@ class ModelConfig:
             "max_seq_len": base_config["max_position_embeddings"],
             "intermediate_dim": base_config["intermediate_size"],
             "attn_dropout": base_config.get("attention_dropout", 0.0),
-            "norm_eps": base_config["rms_norm_eps"],
-            "rope_scaling": base_config.get("rope_scaling"),
-            "rope_theta": base_config["rope_theta"],
-            "vocab_size": base_config["vocab_size"],
-            "num_layers": base_config["num_hidden_layers"],
+            "norm_eps": base_config.get("rms_norm_eps", base_config.get("norm_eps", 1e-6)),
+            "rope_scaling": base_config.get("rope_scaling", None),
+            "rope_theta": base_config.get("rope_theta", 100000.0),
+            "vocab_size": base_config.get("vocab_size", 0),
+            "num_layers": base_config.get("num_hidden_layers", 0),
             "attn_bias": base_config.get("attention_bias", False),
+            "mlp_bias": base_config.get("mlp_bias", False),
             "hidden_act": base_config.get("hidden_act", "silu"),
             "tinygrad_dtype": HF_PRECISION_STR_TO_DTYPE.get(
                 base_config.get("torch_dtype", "bfloat16"),
@@ -60,6 +64,7 @@ class ModelConfig:
             ),
             "tie_word_embeddings": base_config.get("tie_word_embeddings", False),
             "model_type": base_config.get("model_type", ""),
+            "quantization_config": base_config.get("quantization_config"),
             "temperature": 0.0,
             "top_k": 0,
             "top_p": 0.0,
@@ -96,6 +101,8 @@ class ModelConfig:
         custom_seq = os.getenv("TC_MAX_SEQ_LEN")
         if custom_seq is not None:
             self.config["max_seq_len"] = custom_seq
+
+        logger.info(f"Loaded model config: {self.config}")
 
     def load_generation_config(self, gen_config_file: Path):
         with open(gen_config_file, "r") as f:

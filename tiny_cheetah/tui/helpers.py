@@ -11,7 +11,34 @@ from textual.widgets import RichLog
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.models.llm.helpers import sample
+from tiny_cheetah.models.llm.quantize import is_quantized_model_config
 from tiny_cheetah.orchestration.model_engine import ModelEngine
+from tiny_cheetah.logging_utils import get_logger
+logger = get_logger(__name__)
+
+
+def detect_quantization_mode(model_config: Any) -> tuple[bool, str]:
+    if not isinstance(model_config, dict):
+        return False, "standard"
+    if not is_quantized_model_config(model_config):
+        return False, "standard"
+
+    quantization_config = model_config.get("quantization_config")
+    if not isinstance(quantization_config, dict):
+        return True, "quantized"
+
+    quant_method = str(quantization_config.get("quant_method", "quantized")).lower()
+    quant_bits = "4-bit" if quantization_config.get("load_in_4bit") or quantization_config.get("_load_in_4bit") else (
+        "8-bit" if quantization_config.get("load_in_8bit") or quantization_config.get("_load_in_8bit") else ""
+    )
+    quant_type = str(quantization_config.get("bnb_4bit_quant_type", "")).lower()
+
+    parts = [quant_method]
+    if quant_bits:
+        parts.append(quant_bits)
+    if quant_type:
+        parts.append(quant_type)
+    return True, " ".join(parts)
 
 
 def streaming_generate(
@@ -116,31 +143,49 @@ def streaming_generate_with_peers(
 
     input_list = _tensor_to_list(input_ids)
     mask_list = _tensor_to_list(attention_mask)
+    position_list = [[0]]
+    hidden_state_list = []
     
     out_tokens: list[int] = []
     start_time = time.time()
     failed = False
 
     for step in range(max_new_tokens):
-        peer = peers[step % len(peers)]
-        if getattr(peer, "peer_client_id", None) == getattr(peer_client, "peer_client_id", None):
-            token, end_token = engine.get_tokens(
-                model,
-                input_list,
-                mask_list,
-                tokenizer,
-                temp=temp,
-                top_k=top_k,
-                top_p=top_p,
-                alpha_f=alpha_f,
-                alpha_p=alpha_p,
-            )
-        else:
+        logger.debug(f"[step: {step} Starting distributed generation with {len(peers)} peers for up to {max_new_tokens} tokens")
+        logger.debug(f"Initial input_ids: {input_list}, attention_mask: {mask_list}")
+        input_ids = tg.Tensor(input_list)
+        attention_mask = tg.Tensor(mask_list)
+        otoken_data = engine.get_tokens(
+            model,
+            input_ids,
+            attention_mask,
+            tokenizer,
+            temp=temp,
+            top_k=top_k,
+            top_p=top_p,
+            alpha_f=alpha_f,
+            alpha_p=alpha_p,
+        )
+
+        mask_list, position_list, hidden_state_list, end_token = _apply_token_data(
+            engine,
+            tokenizer,
+            otoken_data,
+            input_list,
+            mask_list,
+            position_list,
+            hidden_state_list,
+            out_tokens,
+        )
+
+        for peer in peers:
             payload = {
                 "command": "generate_token",
                 "payload": {
                     "input_ids": input_list,
                     "attention_mask": mask_list,
+                    "position_ids": position_list,
+                    "hidden_state": hidden_state_list, 
                     "temp": temp,
                     "top_k": top_k,
                     "top_p": top_p,
@@ -150,51 +195,48 @@ def streaming_generate_with_peers(
                 },
             }
             try:
-                address = _peer_address(peer)
-                response = peer_client.send_payload(
+                logger.debug(f"Sending payload to peer {getattr(peer, 'peer_client_id', 'unknown')}: {payload}")
+                host = getattr(peer, "address", "0.0.0.0")
+                port = int(getattr(peer, "port", os.getenv("TC_TENSOR_PORT", 1045)))
+                address = (host, port)
+                resp = peer_client.send_payload(
                     payload,
                     expect_reply=True,
                     address=address,
                 )
-            except Exception:
-                failed = True
+                otoken_data = engine.recv_tokens(resp, tokenizer)
+                logger.debug(f"Received response from peer {getattr(peer, 'peer_client_id', 'unknown')}: {otoken_data}")
+            except Exception as err:
+                logger.error(f"Error communicating with peer {getattr(peer, 'peer_client_id', 'unknown')}: {err}")
                 break
 
-            token, end_token = _extract_token(engine, response, tokenizer)
-        if token is None:
-            failed = True
-            break
-
-        out_tokens.append(token)
-        input_list[0].append(token)
-        mask_list[0].append(1)
-        if end_token:
-            break
-
-    if failed and max_new_tokens > len(out_tokens):
-        remaining = max_new_tokens - len(out_tokens)
-        local_input = tg.Tensor(input_list)
-        local_mask = tg.Tensor(mask_list)
-        local_tokens, _ = streaming_generate(
-            model,
-            local_input,
-            local_mask,
-            tokenizer,
-            remaining,
-            temp,
-            top_k,
-            top_p,
-            alpha_f,
-            alpha_p,
-            verbose,
-        )
-        out_tokens.extend(local_tokens)
+            mask_list, position_list, hidden_state_list, end_token = _apply_token_data(
+                engine,
+                tokenizer,
+                otoken_data,
+                input_list,
+                mask_list,
+                position_list,
+                hidden_state_list,
+                out_tokens,
+            )
+            
+            if end_token:
+                break
 
     elapsed = time.time() - start_time
     return out_tokens, elapsed
 
 
-def _tensor_to_list(tensor: tg.Tensor) -> list[list[int]]:
+def _tensor_to_list(tensor: Any) -> list[list[Any]]:
+    if tensor is None:
+        return [[]]
+    if isinstance(tensor, list):
+        if not tensor:
+            return [[]]
+        if isinstance(tensor[0], list):
+            return tensor
+        return [tensor]
     data = tensor.numpy().tolist()
     if not data:
         return [[]]
@@ -225,6 +267,43 @@ def _plan_peer_shards(model_engine: ModelEngine, peer_client: Any, model: Model)
     model_engine.plan_shards(peers, model_name, total_layers)
 
 
+def _apply_token_data(
+    engine: ModelEngine,
+    tokenizer: AutoTokenizer,
+    otoken_data: dict,
+    input_list: list[list[int]],
+    mask_list: list[list[int]],
+    position_list: list[list[int]],
+    hidden_state_list: list[list[Any]],
+    out_tokens: list[int],
+) -> tuple[list[list[int]], list[list[int]], list[list[Any]], bool]:
+    msg = engine.recv_tokens(otoken_data, tokenizer)
+    attention_mask = msg.get("attention_mask")
+    position_ids = msg.get("position_ids")
+    hidden_state = msg.get("hidden_state")
+    token = msg.get("token")
+
+    if attention_mask is not None:
+        mask_list = _tensor_to_list(attention_mask)
+    if position_ids is not None:
+        position_list = _tensor_to_list(position_ids)
+
+    if token is not None:
+        tok = int(token)
+        out_tokens.append(tok)
+        input_list[0].append(tok)
+        if mask_list:
+            mask_list[0].append(1)
+        else:
+            mask_list = [[1]]
+        hidden_state_list = []
+    elif hidden_state is not None:
+        hidden_state_list = _tensor_to_list(hidden_state)
+
+    end_token = bool(msg.get("end_token", False))
+    return mask_list, position_list, hidden_state_list, end_token
+
+
 def _infer_total_layers(model: Model) -> int:
     config = getattr(model, "config", {}) or {}
     num_layers = config.get("num_layers")
@@ -250,46 +329,6 @@ def _local_engine(model: Model) -> ModelEngine:
     if total_layers <= 0:
         return ModelEngine()
     return ModelEngine(shard=Shard("local", 0, total_layers - 1, total_layers))
-
-
-def _generate_next_token_local(
-    engine: ModelEngine,
-    model: Model,
-    input_list: list[list[int]],
-    mask_list: list[list[int]],
-    tokenizer: AutoTokenizer,
-    *,
-    temp: float,
-    top_k: int,
-    top_p: float,
-    alpha_f: float,
-    alpha_p: float,
-) -> tuple[int | None, bool]:
-    input_tensor = tg.Tensor(input_list)
-    mask_tensor = tg.Tensor(mask_list)
-    payload = engine.get_tokens(
-        model,
-        input_tensor,
-        mask_tensor,
-        tokenizer,
-        temp=temp,
-        top_k=top_k,
-        top_p=top_p,
-        alpha_f=alpha_f,
-        alpha_p=alpha_p,
-    )
-    msg = engine.recv_tokens(payload, tokenizer)
-    token = msg.get("token")
-    if token is None:
-        return None, False
-    end_token = bool(msg.get("end_token", token == tokenizer.eos_token_id))
-    return int(token), end_token
-
-
-def _peer_address(peer: Any) -> tuple[str, int]:
-    host = getattr(peer, "address", "0.0.0.0")
-    port = int(getattr(peer, "port", os.getenv("TC_TENSOR_PORT", 1045)))
-    return host, port
 
 
 def _peer_shard_payload(peer: Any) -> dict[str, int | str]:

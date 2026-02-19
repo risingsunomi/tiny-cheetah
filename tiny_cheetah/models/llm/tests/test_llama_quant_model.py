@@ -1,48 +1,64 @@
+import asyncio
 import os
+from pathlib import Path
 import unittest
 import time
 
-import tinygrad as tg
 from transformers import AutoTokenizer
+import tinygrad as tg
 
 from tiny_cheetah.models.llm.model import Model
-from tiny_cheetah.models.llm.helpers import load_safetensors, sample, generate
+from tiny_cheetah.models.llm.helpers import sample
+from tiny_cheetah.models.llm.quantize import is_quantized_model_config, load_quantized_safetensors
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.repos import RepoHuggingFace
+from tiny_cheetah.repos import RepoCustom
 
 TOP_K = 0
-TEMP = 0.65
-TOP_P = 0.0
+TEMP = 0.1
+TOP_P = 0.9
 ALPHA_F = 0.0
 ALPHA_P = 0.0
 
-DEVICE = os.getenv("TC_DEVICE", "CPU")  # or "CUDA"/"CPU"
+DEVICE = "CPU"  # or "CUDA"/"CPU"
 
-class TestModel(unittest.TestCase):
+
+class TestQuantizedLlamaModel(unittest.TestCase):
     def setUp(self):
-        # self.test_model = "meta-llama/Llama-3.2-1B"
-        self.test_model = "unsloth/Llama-3.2-1B-Instruct"
-        
-        repo = RepoHuggingFace(self.test_model)
-        self.model_path, self.model_config_obj = repo.download()
-        self.model_config = self.model_config_obj.config
+        self.test_model = "unsloth/Llama-3.2-1B-Instruct-unsloth-bnb-4bit"
+
+        repo = RepoCustom(self.test_model)
+        config_path = repo.base_dir / "config.json"
+        weight_files = list(repo.base_dir.glob("*.safetensors"))
+        if config_path.exists() and weight_files:
+            repo._load_configs()
+            self.model_path = repo.base_dir
+            self.model_config = repo.model_config.config
+        else:
+            self.model_path, self.model_config, _ = asyncio.run(repo.download())
+            self.model_path = Path(self.model_path)
+
+        self.assertTrue(
+            is_quantized_model_config(self.model_config),
+            "Expected quantized config for unsloth/Llama-3.2-1B-Instruct-unsloth-bnb-4bit",
+        )
+
         shard = Shard(
             self.test_model,
             start_layer=0,
             end_layer=self.model_config["num_layers"],
-            total_layers=self.model_config["num_layers"]+1,
+            total_layers=self.model_config["num_layers"] + 1,
         )
         self.model = Model(self.model_config, shard)
-        load_safetensors(
+        load_quantized_safetensors(
             self.model,
             self.model_path,
             self.model_config,
-            weight_device=DEVICE,   # or "CUDA"/"CPU"
-            use_tied=self.model_config["tie_word_embeddings"]
+            weight_device=DEVICE,
+            use_tied=self.model_config["tie_word_embeddings"],
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.test_model, local_files_only=True
+            str(self.model_path), local_files_only=True
         )
 
     def test_model_generate(self):
@@ -53,7 +69,7 @@ class TestModel(unittest.TestCase):
 
         input_ids = tg.Tensor(enc["input_ids"]).to(DEVICE)
         attention_mask = tg.Tensor(enc["attention_mask"]).to(DEVICE)
-        temp = TEMP if self.model_config["temperature"] is None else self.model_config["temperature"]
+        temp = TEMP #if self.model_config["temperature"] is None else self.model_config["temperature"]
         top_k = TOP_K if self.model_config["top_k"] is None else self.model_config["top_k"]
         top_p = TOP_P if self.model_config["top_p"] is None else self.model_config["top_p"]
         alpha_f = ALPHA_F
@@ -98,6 +114,7 @@ class TestModel(unittest.TestCase):
         out_token = tok.item()
         # toks/sec timer
         t0 = time.time()
+        tok_s = 0
         generated = 1
         curr_pos += 1
 
@@ -114,7 +131,6 @@ class TestModel(unittest.TestCase):
             if out_token == self.tokenizer.eos_token_id:
                 elapsed = time.time() - t0
                 tok_s = generated / elapsed if elapsed > 0 else float("inf")
-                print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")
                 eos_hit = True
                 break
 
@@ -146,3 +162,5 @@ class TestModel(unittest.TestCase):
         if not eos_hit:
             elapsed = time.time() - t0
             tok_s = generated / elapsed if elapsed > 0 else float("inf")
+
+        print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")

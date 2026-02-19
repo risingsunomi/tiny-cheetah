@@ -8,15 +8,16 @@ class MLP:
         self,
         embed_dim: int,
         hidden_dim: int,
-        activation: str = "relu"
+        activation: str = "relu",
+        bias: bool = True,
     ):
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
         self.activation = activation
 
-        self.gate_proj = tinygrad.nn.Linear(embed_dim, hidden_dim)
-        self.up_proj = tinygrad.nn.Linear(embed_dim, hidden_dim)
-        self.down_proj = tinygrad.nn.Linear(hidden_dim, embed_dim)
+        self.gate_proj = tinygrad.nn.Linear(embed_dim, hidden_dim, bias=bias)
+        self.up_proj = tinygrad.nn.Linear(embed_dim, hidden_dim, bias=bias)
+        self.down_proj = tinygrad.nn.Linear(hidden_dim, embed_dim, bias=bias)
         self.activation = activation
 
     def activation_fn(self, x: tinygrad.Tensor) -> tinygrad.Tensor:

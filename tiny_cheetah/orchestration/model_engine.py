@@ -26,30 +26,33 @@ class ModelEngine:
         input_ids: Any,
         attention_mask: Any,
         tokenizer: Any,
+        hidden_state: Any | None = None,
         *,
         temp: float = 1.0,
         top_k: int = 0,
         top_p: float = 0.8,
         alpha_f: float = 0.0,
         alpha_p: float = 0.0,
-        curr_pos: int | None = None,
-        prev_token: int | None = None,
     ) -> Dict[str, Any]:
         """Generate the next token and return a JSON-serializable payload."""
         device = input_ids.device
-        input_ids = input_ids.to(device)
-        attention_mask = attention_mask.to(device)
+        curr_pos = attention_mask.shape[1] - 1
 
-        if prev_token is None:
-            position_ids = ((attention_mask.cumsum(axis=1) - 1) * attention_mask).to(device)
-            model_output = model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
+        if hidden_state is not None:
+            prev_token = input_ids[:, -1].item()
+            position_ids = tg.Tensor([curr_pos], device=device)
+            model_output = model(
+                None,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                hidden_state=hidden_state,
+            )
         else:
+            prev_token = input_ids[:, -1].item()
             next_tok = tg.Tensor([[prev_token]], device=device)
             attention_mask = attention_mask.cat(
                 tg.Tensor.ones((attention_mask.shape[0], 1), device=device), dim=1
             )
-            if curr_pos is None:
-                curr_pos = attention_mask.shape[1] - 1
             position_ids = tg.Tensor([curr_pos], device=device)
             model_output = model(next_tok, attention_mask=attention_mask, position_ids=position_ids)
 
@@ -68,8 +71,7 @@ class ModelEngine:
         end_token = bool(getattr(tokenizer, "eos_token_id", None) == tok)
 
         return {
-            "token": tok,
-            "tensor": _encode_token_tensor(tok),
+            "token": _encode_token_tensor(tok),
             "attention_mask": _encode_tensor(attention_mask),
             "position_ids": _encode_tensor(position_ids),
             "shard": _shard_payload(self.shard),
@@ -190,20 +192,14 @@ def _decode_tensor(tensor_payload: Any) -> tg.Tensor | None:
         return None
     try:
         raw = base64.b64decode(buf)
-    except Exception:
-        return None
-    dtype = _normalize_dtype(str(tensor_payload.get("dtype", "float32")))
-    try:
+    
+        dtype = _normalize_dtype(str(tensor_payload.get("dtype", "float32")))
         arr = np.frombuffer(raw, dtype=np.dtype(dtype))
-    except Exception:
-        return None
-    shape = tensor_payload.get("shape")
-    try:
+        shape = tensor_payload.get("shape")
+
         if shape:
             arr = arr.reshape(shape)
-    except Exception:
-        return None
-    try:
+
         return tg.Tensor(arr)
     except Exception:
         return None

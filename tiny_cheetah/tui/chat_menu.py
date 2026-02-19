@@ -17,7 +17,7 @@ from rich.markup import escape
 
 from tiny_cheetah.models.llm.helpers import load_model
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.tui.helpers import streaming_generate_with_peers
+from tiny_cheetah.tui.helpers import streaming_generate_with_peers, detect_quantization_mode
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
@@ -79,6 +79,7 @@ class ChatScreen(Screen[None]):
         self._generating_resp: bool = False
         self.out_tokens: List[int] = []
         self._model_loaded: bool = False
+        self._model_is_quantized: bool = False
         self._log_storage = ChatLogStorage()
         self._current_log_id: Optional[int] = None
         
@@ -165,7 +166,7 @@ class ChatScreen(Screen[None]):
             self._set_load_button_enabled(False)
             
             self._log_sys_msg(f"Loading model '{self._model_id}'...")
-            self._start_model_load()
+            await self._start_model_load()
             self._chat_input.placeholder = ""
         elif event.button.id == "clear-model":
             self._clear_model(persist=True)
@@ -602,17 +603,19 @@ class ChatScreen(Screen[None]):
             return None
         return self._parse_log_item_id(getattr(widget, "id", None))
 
-    def _start_model_load(self) -> None:
+    async def _start_model_load(self) -> None:
         # loaded_model = self._load_model()
         try:
-            self._model, self._model_config, self._tokenizer, self._model_cache_path, elapsed = self._load_model()
+            self._model, self._model_config, self._tokenizer, self._model_cache_path, elapsed = await self._load_model()
         except Exception as exc:
             self._log_sys_msg(f"Model load failed: {exc}\n traceback: {traceback.format_exc()}")
             self._set_load_button_enabled(True)
             if self._chat_input is not None:
                 self._chat_input.focus()
         else:
-            ready_msg = f"Model ready in {elapsed:.1f}s."
+            self._model_is_quantized, quant_mode = detect_quantization_mode(self._model_config)
+            mode_label = f"quantized ({quant_mode})" if self._model_is_quantized else "standard"
+            ready_msg = f"Model ready in {elapsed:.1f}s. Mode: {mode_label}."
             self._log_sys_msg(ready_msg)
             self._model_loaded = True
             self._set_load_button_enabled(True)
@@ -623,16 +626,20 @@ class ChatScreen(Screen[None]):
     async def _log_sys_msg_async(self, message: str) -> Awaitable[None]:
         await asyncio.to_thread(self._append_system, message, persist=False)
 
-    def _load_model(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
-        start = time.time()
-        model, model_config, tokenizer, model_path = load_model(
-            self._model_id,
-            None,
-            None,
-            self._offline
-        )
-        elapsed = time.time() - start
-        return model, model_config, tokenizer, model_path, elapsed
+    async def _load_model(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
+        try:
+            start = time.time()
+            model, model_config, tokenizer, model_path = await load_model(
+                self._model_id,
+                None,
+                None,
+                self._offline
+            )
+            elapsed = time.time() - start
+            return model, model_config, tokenizer, model_path, elapsed
+        except Exception as exc:
+            logger.exception("Error loading model '%s': %s", self._model_id, exc)
+            raise
 
     def _generate_response(self, max_new_tokens: int = 4096) -> None:
         template = self._tokenizer.apply_chat_template(
@@ -700,6 +707,7 @@ class ChatScreen(Screen[None]):
         self._model_config = None
         self._tokenizer = None
         self._model_cache_path = None
+        self._model_is_quantized = False
         self._history.clear()
         self._generating_resp = False
         if not self._model_loaded:

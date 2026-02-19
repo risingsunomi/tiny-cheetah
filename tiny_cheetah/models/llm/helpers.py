@@ -1,6 +1,8 @@
 """
 Helpers for LLM models.
 """
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Dict, Optional, Any
 import json
@@ -12,6 +14,7 @@ from transformers import AutoTokenizer
 
 from tiny_cheetah.models.llm.model import Model
 from tiny_cheetah.models.llm.model_config import ModelConfig
+from tiny_cheetah.models.llm.quantize import is_quantized_model_config, load_quantized_safetensors
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.repos import RepoCustom
@@ -68,6 +71,11 @@ def load_safetensors(
     Loading weights into model
     """
     model_files = list(model_path.glob("*.safetensors"))
+
+    if len(model_files) == 0:
+        logger.error("No safetensor files found in model path %s", model_path)
+        raise FileNotFoundError(f"No safetensor files found in model path {model_path}")
+    
     weight_map = {}
 
     # get weight map if there is one
@@ -132,7 +140,6 @@ def load_safetensors(
         )
     
     tg.nn.state.load_state_dict(model, model_state_dict)
-
 """
 LLM sampling
 """
@@ -245,8 +252,8 @@ def generate(
 
     # prefill
     next_logit = logits[:, -1, :].flatten() # [B, V]
-    tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
-    tok = tok.item()
+    tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+    tok = tok_sample.item()
     out_tokens.append(tok)
     # toks/sec timer
     t0 = time.time()
@@ -260,7 +267,7 @@ def generate(
     limit = max_new_tokens - 1 if max_new_tokens > 0 else None
 
     while True:
-        if tok == tokenizer.eos_token_id:
+        if tok_sample == tokenizer.eos_token_id:
             elapsed = time.time() - t0
             tok_s = generated / elapsed if elapsed > 0 else float("inf")
             print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")
@@ -290,8 +297,8 @@ def generate(
             position_ids=position_ids
         )
         next_logit = logits[:, -1, :].flatten()  # [B, V]
-        tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
-        tok = tok.item()
+        tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+        tok = tok_sample.item()
         out_tokens.append(tok)
         curr_pos += 1
 
@@ -318,7 +325,7 @@ def load_model_config(model_path: Path) -> Dict[str, Any]:
     
     return model_config.config
 
-def load_model(
+async def load_model(
     model_id: str,
     shard: Shard = None,
     weight_device: str = os.getenv("TC_DEVICE") or "CPU",
@@ -341,7 +348,7 @@ def load_model(
     elif resolved_path is None and not offline_mode:
         logger.info("No path resolved to model %s, creating a new path %s and downloading model", model_id, cache_path)
         model_path = cache_path
-        model_path, model_config, _ = model_repo.download()
+        model_path, model_config, _ = await model_repo.download()
     elif offline_mode:
         logger.error("Model %s not found in offline mode", model_id)
         raise FileNotFoundError(f"Model {model_id} not found in offline mode")
@@ -355,13 +362,23 @@ def load_model(
         )
 
     model = Model(model_config, shard)
-    load_safetensors(
-        model,
-        model_path,
-        model_config,
-        weight_device=weight_device,
-        use_tied=model_config["tie_word_embeddings"]
-    )
+    if is_quantized_model_config(model_config):
+        logger.info("Detected quantized model for %s, loading with tinygrad NF4 loader.", model_id)
+        load_quantized_safetensors(
+            model,
+            model_path,
+            model_config,
+            weight_device=weight_device,
+            use_tied=model_config["tie_word_embeddings"]
+        )
+    else:
+        load_safetensors(
+            model,
+            model_path,
+            model_config,
+            weight_device=weight_device,
+            use_tied=model_config["tie_word_embeddings"]
+        )
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_path),
         local_files_only=offline_mode
