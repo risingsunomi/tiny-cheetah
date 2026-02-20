@@ -6,8 +6,7 @@ import unittest
 from tiny_cheetah.orchestration.model_engine import ModelEngine
 from tiny_cheetah.orchestration.cdevice import CDevice
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.models.llm.helpers import load_safetensors
-from tiny_cheetah.models.llm.model import Model
+from tiny_cheetah.models.llm.backend import backend_helpers_module, backend_model_class
 from tiny_cheetah.repos import RepoCustom
 
 
@@ -52,6 +51,9 @@ class TestModelEngine(unittest.TestCase):
             import tinygrad
         except Exception:
             self.skipTest("tinygrad is required for this test.")
+
+        Model = backend_model_class("tinygrad")
+        load_safetensors = backend_helpers_module("tinygrad").load_safetensors
 
         config = repo.model_config.config
         shard = Shard(

@@ -112,12 +112,14 @@ Footer {
 }
 
 ModalScreen#chat-log-name-modal,
-ModalScreen#chat-log-confirm-modal {
+ModalScreen#chat-log-confirm-modal,
+ModalScreen#chat-gen-config-modal {
     align: center middle;
 }
 
 #chat-log-name-modal-container,
-#chat-log-confirm-modal-container {
+#chat-log-confirm-modal-container,
+#chat-gen-config-modal-container {
     background: $surface;
     border: round $primary;
     width: 60%;
@@ -127,7 +129,8 @@ ModalScreen#chat-log-confirm-modal {
 }
 
 #chat-log-name-title,
-#chat-log-confirm-title {
+#chat-log-confirm-title,
+#chat-gen-config-title {
     text-align: center;
     text-style: bold;
     margin-bottom: 1;
@@ -138,7 +141,8 @@ ModalScreen#chat-log-confirm-modal {
 }
 
 #chat-log-name-buttons,
-#chat-log-confirm-buttons {
+#chat-log-confirm-buttons,
+#chat-gen-config-buttons {
     layout: horizontal;
     align: right middle;
     margin-top: 1;
@@ -147,6 +151,19 @@ ModalScreen#chat-log-confirm-modal {
 #chat-log-name-buttons Button#chat-log-name-save,
 #chat-log-confirm-buttons Button#chat-log-confirm-accept {
     margin-left: 1;
+}
+
+#chat-gen-config-buttons Button#chat-gen-config-save {
+    margin-left: 1;
+}
+
+.chat-gen-config-label {
+    margin-top: 1;
+}
+
+#chat-gen-config-status {
+    color: $warning;
+    margin-top: 1;
 }
 #peer-counter {
     text-align: right;

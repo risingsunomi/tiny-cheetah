@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from pathlib import Path
+import json
+import os
+
+import torch
+
+from tiny_cheetah.logging_utils import get_logger
+
+logger = get_logger(__name__)
+
+
+class ModelConfig:
+    def __init__(self):
+        self.config: dict = {}
+        self.qk_norm_models = ["qwen3", "qwen2"]
+
+    def load(self, config_file: Path) -> None:
+        with open(config_file, "r") as handle:
+            base_config = json.loads(handle.read())
+
+        hf_precision_str_to_dtype = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+            "float64": torch.float64,
+            "int8": torch.int8,
+            "int16": torch.int16,
+            "int32": torch.int32,
+            "int64": torch.int64,
+            "uint8": torch.uint8,
+            "bool": torch.bool,
+        }
+
+        self.config = {
+            "architectures": base_config.get("architectures", []),
+            "embed_dim": base_config["hidden_size"],
+            "num_heads": base_config["num_attention_heads"],
+            "head_dim": base_config.get(
+                "head_dim",
+                base_config["hidden_size"] // base_config["num_attention_heads"],
+            ),
+            "num_kv_heads": base_config["num_key_value_heads"],
+            "max_seq_len": base_config["max_position_embeddings"],
+            "intermediate_dim": base_config["intermediate_size"],
+            "attn_dropout": base_config.get("attention_dropout", 0.0),
+            "norm_eps": base_config.get("rms_norm_eps", base_config.get("norm_eps", 1e-6)),
+            "rope_scaling": base_config.get("rope_scaling", None),
+            "rope_theta": base_config.get("rope_theta", 100000.0),
+            "vocab_size": base_config.get("vocab_size", 0),
+            "num_layers": base_config.get("num_hidden_layers", 0),
+            "attn_bias": base_config.get("attention_bias", False),
+            "mlp_bias": base_config.get("mlp_bias", False),
+            "hidden_act": base_config.get("hidden_act", "silu"),
+            "torch_dtype": hf_precision_str_to_dtype.get(
+                base_config.get("torch_dtype", "bfloat16"),
+                torch.bfloat16,
+            ),
+            "tie_word_embeddings": base_config.get("tie_word_embeddings", False),
+            "model_type": base_config.get("model_type", ""),
+            "quantization_config": base_config.get("quantization_config"),
+            "temperature": 0.0,
+            "top_k": 0,
+            "top_p": 0.0,
+            "eos_token_id": None,
+            "pad_token_id": None,
+            "bos_token_id": None,
+        }
+
+        self.config["rope_scaling_factor"] = None
+        self.config["rope_low_freq_factor"] = 0.0
+        self.config["rope_high_freq_factor"] = 0.0
+        self.config["rope_original_max_pos_embeddings"] = 0
+
+        rope_scaling = self.config.get("rope_scaling")
+        if rope_scaling is not None:
+            self.config["rope_scaling_factor"] = rope_scaling.get("factor", rope_scaling.get("rope_factor", 0))
+            self.config["rope_low_freq_factor"] = rope_scaling.get("low_freq_factor", rope_scaling.get("beta_fast", 0))
+            self.config["rope_high_freq_factor"] = rope_scaling.get("high_freq_factor", rope_scaling.get("beta_slow", 0))
+            self.config["rope_original_max_pos_embeddings"] = rope_scaling.get(
+                "original_max_position_embeddings",
+                rope_scaling.get("original_max_pos", 0),
+            )
+            self.config["rope_type"] = rope_scaling.get("rope_type", "llama3")
+
+        attn_qk_norm = base_config.get("attn_qk_norm")
+        if isinstance(attn_qk_norm, bool):
+            self.config["qk_norm"] = attn_qk_norm
+        elif isinstance(attn_qk_norm, str):
+            self.config["qk_norm"] = len(attn_qk_norm) > 0
+        elif self.config.get("model_type", "") in self.qk_norm_models:
+            self.config["qk_norm"] = True
+        else:
+            self.config["qk_norm"] = False
+
+        custom_seq = os.getenv("TC_MAX_SEQ_LEN")
+        if custom_seq is not None:
+            self.config["max_seq_len"] = int(custom_seq)
+
+        logger.info("Loaded model config: %s", self.config)
+
+    def load_generation_config(self, gen_config_file: Path) -> None:
+        with open(gen_config_file, "r") as handle:
+            gen_config = json.loads(handle.read())
+
+        if os.getenv("TC_TEMP") is not None:
+            self.config["temperature"] = float(os.getenv("TC_TEMP"))
+        else:
+            self.config["temperature"] = gen_config.get("temperature", 0.0)
+
+        if os.getenv("TC_TOP_K") is not None:
+            self.config["top_k"] = int(os.getenv("TC_TOP_K"))
+        else:
+            self.config["top_k"] = gen_config.get("top_k", 0)
+
+        if os.getenv("TC_TOP_P") is not None:
+            self.config["top_p"] = float(os.getenv("TC_TOP_P"))
+        else:
+            self.config["top_p"] = gen_config.get("top_p", 0.0)
+
+        self.config["eos_token_id"] = gen_config.get("eos_token_id")
+        self.config["pad_token_id"] = gen_config.get("pad_token_id")
+        self.config["bos_token_id"] = gen_config.get("bos_token_id")
+
+    def __str__(self) -> str:
+        return str(self.config)

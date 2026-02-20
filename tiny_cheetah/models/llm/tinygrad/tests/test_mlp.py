@@ -1,7 +1,7 @@
 import unittest
 
 import tinygrad
-from models.llm.mlp import MLP
+from tiny_cheetah.models.llm.tinygrad.mlp import MLP
 
 class TestMLP(unittest.TestCase):
 

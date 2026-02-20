@@ -4,11 +4,11 @@ import os
 import asyncio
 import inspect
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, List
+from typing import Any, Awaitable, Callable, Iterable, List
 
 import requests
 
-from tiny_cheetah.models.llm.model_config import ModelConfig
+from tiny_cheetah.models.llm.backend import backend_model_config_class
 
 DEFAULT_FILES = {
     "config.json",
@@ -30,14 +30,14 @@ class RepoCustom:
         sanitized = model_name.replace("/", "__")
         self.base_dir = (cache_root or Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.model_config = ModelConfig()
+        self.model_config = backend_model_config_class()()
 
     async def download(
         self,
         extra_files: Iterable[str] | None = None,
         revision: str = "main",
         progress_callback: Callable[[str], Awaitable[None] | None] | None = None,
-    ) -> tuple[Path, ModelConfig, List[str]]:
+    ) -> tuple[Path, Any, List[str]]:
         messages: List[str] = []
 
         async def emit(message: str) -> None:

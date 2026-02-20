@@ -1,7 +1,7 @@
 import unittest
 
 import tinygrad as tg
-from ..attention import MultiHeadAttention
+from tiny_cheetah.models.llm.tinygrad.attention import MultiHeadAttention
 
 class TestMultiHeadAttention(unittest.TestCase):
     def setUp(self):

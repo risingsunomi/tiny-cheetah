@@ -2,7 +2,7 @@ import unittest
 
 import tinygrad as tg
 
-from ..kv_cache import KVCache
+from tiny_cheetah.models.llm.tinygrad.kv_cache import KVCache
 
 
 class TestKVCache(unittest.TestCase):

@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 
-from tiny_cheetah.models.llm.quantize import _dequantize_bnb_nf4, _dequantize_bnb_nf4_simple, is_quantized_model_config
+from tiny_cheetah.models.llm.tinygrad.quantize import _dequantize_bnb_nf4, _dequantize_bnb_nf4_simple, is_quantized_model_config
 
 
 class TestQuantizedLoader(unittest.TestCase):

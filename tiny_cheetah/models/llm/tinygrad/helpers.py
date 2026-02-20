@@ -12,9 +12,9 @@ import safetensors
 import tinygrad as tg
 from transformers import AutoTokenizer
 
-from tiny_cheetah.models.llm.model import Model
-from tiny_cheetah.models.llm.model_config import ModelConfig
-from tiny_cheetah.models.llm.quantize import is_quantized_model_config, load_quantized_safetensors
+from .model import Model
+from .model_config import ModelConfig
+from .quantize import is_quantized_model_config, load_quantized_safetensors
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.repos import RepoCustom

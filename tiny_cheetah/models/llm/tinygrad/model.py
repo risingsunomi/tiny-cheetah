@@ -1,6 +1,6 @@
 import tinygrad as tg
 
-from ..shard import Shard
+from ...shard import Shard
 from .transformer import TransformerBlock
 
 class Model:

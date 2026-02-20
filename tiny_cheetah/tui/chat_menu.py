@@ -4,27 +4,24 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-import inspect
-import os
 import time
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import traceback
 
-import tinygrad as tg
 from transformers import AutoTokenizer
 from rich.markup import escape
 
-from tiny_cheetah.models.llm.helpers import load_model
-from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.tui.helpers import streaming_generate_with_peers, detect_quantization_mode
-from tiny_cheetah.models.llm.model import Model
+from tiny_cheetah.models.llm.backend import (
+    detect_quantization_mode,
+    get_llm_backend,
+    load_model_for_backend,
+)
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
 from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 
-from textual import worker
 from textual.app import ComposeResult
 from textual.containers import Container
 from textual.events import Mount
@@ -69,9 +66,10 @@ class ChatScreen(Screen[None]):
         super().__init__()
         self._peer_client: PeerClient = peer_client
         self._offline: bool = offline
+        self._llm_backend: str = get_llm_backend()
         self._model_id: str = default_model or ""
         self._tok_stats: float = 0.0
-        self._model: Optional[Model] = None
+        self._model: Optional[Any] = None
         self._model_config: Optional[object] = None
         self._tokenizer: Optional[AutoTokenizer] = None
         self._model_cache_path: Optional[Path] = None
@@ -90,6 +88,14 @@ class ChatScreen(Screen[None]):
         self._chat_log_list: Optional[ListView] = None
         self._load_button: Optional[Button] = None
         self._peer_label: Optional[Label] = None
+        self._torch_peer_notice_shown: bool = False
+        self._gen_overrides: Dict[str, float | int] = {}
+        self._streaming_reply_open: bool = False
+        self._streaming_reply_timestamp: Optional[str] = None
+        self._streamed_chars: int = 0
+        self._streaming_reply_text: str = ""
+        self._streaming_reply_prefix: str = ""
+        self._streaming_rendered_lines: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -114,6 +120,7 @@ class ChatScreen(Screen[None]):
                         self._model_label = model_value
                         yield model_value
                         yield Button("Select Model", id="open-model-picker")
+                        yield Button("Gen Config", id="open-gen-config")
                         load_button = Button("Load Model", id="load-model")
                         self._load_button = load_button
                         yield load_button
@@ -150,6 +157,8 @@ class ChatScreen(Screen[None]):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "open-model-picker":
             self._open_model_picker()
+        elif event.button.id == "open-gen-config":
+            self._open_gen_config()
         elif event.button.id == "load-model":
             self._chat_input.placeholder = "Loading model..."
             if not self._model_id:
@@ -165,7 +174,10 @@ class ChatScreen(Screen[None]):
 
             self._set_load_button_enabled(False)
             
-            self._log_sys_msg(f"Loading model '{self._model_id}'...")
+            self._llm_backend = get_llm_backend()
+            self._log_sys_msg(
+                f"Loading model '{self._model_id}' with backend '{self._llm_backend}'..."
+            )
             await self._start_model_load()
             self._chat_input.placeholder = ""
         elif event.button.id == "clear-model":
@@ -183,6 +195,58 @@ class ChatScreen(Screen[None]):
 
     def _open_model_picker(self) -> None:
         self.app.push_screen(ModelPickerScreen(self._model_id or ""), self._handle_model_selected)
+
+    def _open_gen_config(self) -> None:
+        effective = self._effective_gen_config()
+        modal = GenerationConfigModal(
+            temperature=effective["temperature"],
+            top_k=int(effective["top_k"]),
+            top_p=effective["top_p"],
+            alpha_f=effective["alpha_f"],
+            alpha_p=effective["alpha_p"],
+        )
+        self.app.push_screen(modal, self._apply_gen_config)
+
+    def _apply_gen_config(self, result: Optional[dict[str, float | int]]) -> None:
+        if result is None:
+            return
+        self._gen_overrides.update(result)
+        self._log_sys_msg(
+            "Gen config updated: "
+            f"temp={self._gen_overrides.get('temperature')}, "
+            f"top_k={self._gen_overrides.get('top_k')}, "
+            f"top_p={self._gen_overrides.get('top_p')}, "
+            f"alpha_f={self._gen_overrides.get('alpha_f')}, "
+            f"alpha_p={self._gen_overrides.get('alpha_p')}",
+            persist=False,
+        )
+
+    def _effective_gen_config(self) -> dict[str, float | int]:
+        config = self._model_config if isinstance(self._model_config, dict) else {}
+
+        def _as_float(value: Any, default: float) -> float:
+            if value is None:
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _as_int(value: Any, default: int) -> int:
+            if value is None:
+                return default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        return {
+            "temperature": _as_float(self._gen_overrides.get("temperature", config.get("temperature")), 1.0),
+            "top_k": _as_int(self._gen_overrides.get("top_k", config.get("top_k")), 0),
+            "top_p": _as_float(self._gen_overrides.get("top_p", config.get("top_p")), 0.8),
+            "alpha_f": _as_float(self._gen_overrides.get("alpha_f", 0.0), 0.0),
+            "alpha_p": _as_float(self._gen_overrides.get("alpha_p", 0.0), 0.0),
+        }
 
     def _handle_model_selected(self, result: Optional[str]) -> None:
         if not result:
@@ -228,8 +292,6 @@ class ChatScreen(Screen[None]):
             if self._generating_resp:
                 self._log_sys_msg("Model is generating a response; please wait...")
                 return
-            if not self._model_loaded:
-                self._start_model_load()
 
             if self._current_log_id is None:
                 self._log_sys_msg("Create or load a chat log before chatting.")
@@ -237,22 +299,64 @@ class ChatScreen(Screen[None]):
             if not self._model_id:
                 self._log_sys_msg("Select a model before chatting (Ctrl+S).")
                 return
+            if not self._model_loaded:
+                await self._start_model_load()
+                if not self._model_loaded:
+                    return
 
             self._append_user(content)
             self._history.append({"role": "user", "content": content})
 
+            self._start_model_stream()
             event.input.placeholder = "Generating response..."
+            self._set_chat_input_enabled(False)
             self._generating_resp = True
-            self.refresh()
-            self.call_after_refresh(self._run_generation)
+            
+            asyncio.create_task(self._run_generation())
+            self.apprefresh()
 
-    def _run_generation(self) -> None:
+    async def _run_generation(self) -> None:
+        if (
+            self._llm_backend == "torch"
+            and self._peer_client.peer_count() > 1
+            and not self._torch_peer_notice_shown
+        ):
+            self._log_sys_msg(
+                "Torch backend currently runs local generation only; peer token streaming remains tinygrad-only."
+            )
+            self._torch_peer_notice_shown = True
+
         try:
-            self._generate_response()
+            try:
+                out_tokens, elapsed = await asyncio.to_thread(
+                    self._generate_response,
+                    self._stream_model_token_from_thread,
+                )
+            except Exception as exc:
+                self._finish_model_stream_line()
+                self._streaming_reply_timestamp = None
+                self._streamed_chars = 0
+                self._log_sys_msg(f"Error during generation: {exc}")
+                self._log_sys_msg(f"Traceback: {traceback.format_exc()}")
+                return
+
+            token_count = len(out_tokens)
+            tok_rate = (token_count / elapsed) if elapsed > 0 else float("inf")
+            self._tok_stats = tok_rate if token_count else 0.0
+            if self._stats_label is not None:
+                display_rate = self._tok_stats if token_count else 0.0
+                self._stats_label.update(f"Tokens/sec: {display_rate:.1f}")
+
+            reply = ""
+            if self._tokenizer is not None:
+                reply = self._tokenizer.decode(out_tokens, skip_special_tokens=True).strip()
+            self._finalize_model_stream(reply)
         finally:
             self._generating_resp = False
             if self._chat_input is not None:
                 self._chat_input.placeholder = ""
+                self._set_chat_input_enabled(True)
+                self._chat_input.focus()
 
     def _append_user(
         self,
@@ -317,6 +421,98 @@ class ChatScreen(Screen[None]):
         action_scroll_end = getattr(self._chat_log, "action_scroll_end", None)
         if callable(action_scroll_end):
             action_scroll_end()
+
+    def _set_chat_input_enabled(self, enabled: bool) -> None:
+        if self._chat_input is not None:
+            self._chat_input.disabled = not enabled
+
+    def _start_model_stream(self) -> None:
+        if self._chat_log is None:
+            return
+        entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        label = escape(self._model_id or "Model")
+        self._streaming_reply_timestamp = entry_time
+        self._streaming_reply_open = True
+        self._streamed_chars = 0
+        self._streaming_reply_text = ""
+        self._streaming_reply_prefix = f"({entry_time}) [bold][#ff0000]{label}[/][/bold]: "
+        self._streaming_rendered_lines = 0
+        self._render_stream_line()
+
+    def _append_model_stream_chunk(self, chunk: str) -> None:
+        if not self._streaming_reply_open:
+            return
+        if not chunk:
+            return
+        self._streamed_chars += len(chunk)
+        self._streaming_reply_text += chunk
+        self._render_stream_line()
+
+    def _render_stream_line(self) -> None:
+        log = self._chat_log
+        if log is None or not self._streaming_reply_open:
+            return
+        if self._streaming_rendered_lines > 0:
+            remove_count = min(self._streaming_rendered_lines, len(log.lines))
+            if remove_count > 0:
+                del log.lines[-remove_count:]
+                line_cache = getattr(log, "_line_cache", None)
+                if line_cache is not None:
+                    line_cache.clear()
+        before = len(log.lines)
+        log.write(self._streaming_reply_prefix + escape(self._streaming_reply_text))
+        self._streaming_rendered_lines = max(0, len(log.lines) - before)
+        log.scroll_end(animate=False, force=True)
+
+    def _finish_model_stream_line(self) -> None:
+        if not self._streaming_reply_open:
+            return
+        self._streaming_reply_open = False
+        self._streaming_reply_text = ""
+        self._streaming_reply_prefix = ""
+        self._streaming_rendered_lines = 0
+
+    def _finalize_model_stream(self, reply: str) -> None:
+        final_reply = reply.strip()
+        if not final_reply:
+            final_reply = "(empty response)"
+
+        # Replace the live streamed text with the final full decode so the
+        # visible chat line always matches persisted chat history.
+        if self._streaming_reply_open:
+            self._streaming_reply_text = final_reply
+            self._render_stream_line()
+
+        self._finish_model_stream_line()
+        entry_time = self._streaming_reply_timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._record_message("assistant", final_reply, entry_time)
+        self._history.append({"role": "assistant", "content": final_reply})
+        if len(self._history) > 6:
+            self._history = self._history[-6:]
+        self._streaming_reply_timestamp = None
+        self._streamed_chars = 0
+
+    def _stream_model_token_from_thread(self, token: int) -> None:
+        piece = self._decode_token_piece(token)
+        if not piece:
+            self.app.refresh()
+            return
+        self.app.call_from_thread(self._append_model_stream_chunk, piece)
+
+    def _decode_token_piece(self, token: int) -> str:
+        tokenizer = self._tokenizer
+        if tokenizer is None:
+            return ""
+        if token == tokenizer.eos_token_id:
+            return ""
+        try:
+            return tokenizer.decode(
+                [token],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+        except TypeError:
+            return tokenizer.decode([token], skip_special_tokens=True)
 
     def _record_message(self, role: str, content: str, timestamp: str) -> None:
         if self._current_log_id is None:
@@ -613,9 +809,14 @@ class ChatScreen(Screen[None]):
             if self._chat_input is not None:
                 self._chat_input.focus()
         else:
-            self._model_is_quantized, quant_mode = detect_quantization_mode(self._model_config)
+            self._model_is_quantized, quant_mode = detect_quantization_mode(
+                self._model_config,
+                backend=self._llm_backend,
+            )
             mode_label = f"quantized ({quant_mode})" if self._model_is_quantized else "standard"
-            ready_msg = f"Model ready in {elapsed:.1f}s. Mode: {mode_label}."
+            ready_msg = (
+                f"Model ready in {elapsed:.1f}s. Backend: {self._llm_backend}. Mode: {mode_label}."
+            )
             self._log_sys_msg(ready_msg)
             self._model_loaded = True
             self._set_load_button_enabled(True)
@@ -626,14 +827,16 @@ class ChatScreen(Screen[None]):
     async def _log_sys_msg_async(self, message: str) -> Awaitable[None]:
         await asyncio.to_thread(self._append_system, message, persist=False)
 
-    async def _load_model(self) -> tuple[Model, object, AutoTokenizer, Path, float]:
+    async def _load_model(self) -> tuple[Any, object, AutoTokenizer, Path, float]:
         try:
+            self._llm_backend = get_llm_backend()
             start = time.time()
-            model, model_config, tokenizer, model_path = await load_model(
-                self._model_id,
-                None,
-                None,
-                self._offline
+            model, model_config, tokenizer, model_path = await load_model_for_backend(
+                model_id=self._model_id,
+                shard=None,
+                weight_device=None,
+                offline_mode=self._offline,
+                backend=self._llm_backend,
             )
             elapsed = time.time() - start
             return model, model_config, tokenizer, model_path, elapsed
@@ -641,7 +844,29 @@ class ChatScreen(Screen[None]):
             logger.exception("Error loading model '%s': %s", self._model_id, exc)
             raise
 
-    def _generate_response(self, max_new_tokens: int = 4096) -> None:
+    def _generate_response(
+        self,
+        on_token: Optional[Callable[[int], None]] = None,
+    ) -> tuple[list[int], float]:
+        max_new_tokens = self._model_config.get("max_seq_len", 4096)
+        if self._llm_backend == "torch":
+            return self._generate_response_torch(
+                max_new_tokens=max_new_tokens,
+                on_token=on_token,
+            )
+        return self._generate_response_tinygrad(
+            max_new_tokens=max_new_tokens,
+            on_token=on_token,
+        )
+
+    def _generate_response_tinygrad(
+        self,
+        max_new_tokens: int = 4096,
+        on_token: Optional[Callable[[int], None]] = None,
+    ) -> tuple[list[int], float]:
+        import tinygrad as tg
+        from tiny_cheetah.tui.helpers import streaming_generate_with_peers
+
         template = self._tokenizer.apply_chat_template(
             self._history,
             add_generation_prompt=True,
@@ -655,12 +880,15 @@ class ChatScreen(Screen[None]):
             self._model.reset_kv_cache()
 
         max_new = max_new_tokens
-        temp = self._model_config["temperature"]
-        top_k = self._model_config["top_k"]
-        top_p = self._model_config["top_p"]
+        gen_cfg = self._effective_gen_config()
+        temp = float(gen_cfg["temperature"])
+        top_k = int(gen_cfg["top_k"])
+        top_p = float(gen_cfg["top_p"])
+        alpha_f = float(gen_cfg["alpha_f"])
+        alpha_p = float(gen_cfg["alpha_p"])
 
+        self._peer_client.in_use = True
         try:
-            self._peer_client.in_use = True
             result = streaming_generate_with_peers(
                 self._peer_client,
                 self._model,
@@ -671,32 +899,65 @@ class ChatScreen(Screen[None]):
                 temp,
                 top_k,
                 top_p,
+                alpha_f,
+                alpha_p,
+                on_token=on_token,
             )
-            if result is None:
-                self._log_sys_msg("streaming_generate_with_peers returned None.")
+        finally:
             self._peer_client.in_use = False
-        except Exception as exc:
-            self._log_sys_msg(f"Error during generation: {exc}")
-            self._log_sys_msg(f"Traceback: {traceback.format_exc()}")
-            result = None
         if result is None:
-            self._log_sys_msg("Generation failed to produce output.")
-            return
-        out_tokens, elapsed = result
-        token_count = len(out_tokens)
-        tok_rate = (token_count / elapsed) if elapsed > 0 else float("inf")
-        self._tok_stats = tok_rate if token_count else 0.0
-        if self._stats_label is not None:
-            display_rate = self._tok_stats if token_count else 0.0
-            self._stats_label.update(f"Tokens/sec: {display_rate:.1f}")
+            raise RuntimeError("streaming_generate_with_peers returned no output")
+        return result
 
-        reply = self._tokenizer.decode(out_tokens, skip_special_tokens=True).strip()
-        if not reply:
-            reply = "(empty response)"
-        self._append_model(reply)
-        self._history.append({"role": "assistant", "content": reply})
-        if len(self._history) > 6:
-            self._history = self._history[-6:]
+    def _generate_response_torch(
+        self,
+        max_new_tokens: int = 4096,
+        on_token: Optional[Callable[[int], None]] = None,
+    ) -> tuple[list[int], float]:
+        import torch
+        from tiny_cheetah.tui.helpers import streaming_generate_with_peers
+
+        template = self._tokenizer.apply_chat_template(
+            self._history,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        enc = self._tokenizer(template, return_tensors="np")
+        input_ids = torch.tensor(enc["input_ids"], dtype=torch.long)
+        attention_mask = torch.tensor(enc["attention_mask"], dtype=torch.long)
+
+        if hasattr(self._model, "reset_kv_cache"):
+            self._model.reset_kv_cache()
+
+        max_new = max_new_tokens
+        gen_cfg = self._effective_gen_config()
+        temp = float(gen_cfg["temperature"])
+        top_k = int(gen_cfg["top_k"])
+        top_p = float(gen_cfg["top_p"])
+        alpha_f = float(gen_cfg["alpha_f"])
+        alpha_p = float(gen_cfg["alpha_p"])
+
+        self._peer_client.in_use = True
+        try:
+            result = streaming_generate_with_peers(
+                self._peer_client,
+                self._model,
+                input_ids,
+                attention_mask,
+                self._tokenizer,
+                max_new,
+                temp,
+                top_k,
+                top_p,
+                alpha_f,
+                alpha_p,
+                on_token=on_token,
+            )
+        finally:
+            self._peer_client.in_use = False
+        if result is None:
+            raise RuntimeError("streaming_generate_with_peers returned no output")
+        return result
 
     def _clear_model(self, *, persist: bool = False) -> None:
         if persist:
@@ -708,8 +969,16 @@ class ChatScreen(Screen[None]):
         self._tokenizer = None
         self._model_cache_path = None
         self._model_is_quantized = False
+        self._torch_peer_notice_shown = False
         self._history.clear()
         self._generating_resp = False
+        self._streaming_reply_open = False
+        self._streaming_reply_timestamp = None
+        self._streamed_chars = 0
+        self._streaming_reply_text = ""
+        self._streaming_reply_prefix = ""
+        self._streaming_rendered_lines = 0
+        self._set_chat_input_enabled(True)
         if not self._model_loaded:
             self._set_load_button_enabled(True)
         if persist:
@@ -751,6 +1020,114 @@ class ChatLogNameModal(ModalScreen[Optional[str]]):
         elif event.button.id == "chat-log-name-save":
             value = self._chat_input.value.strip() if self._chat_input else ""
             self.dismiss(value or None)
+
+
+class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
+    """Modal dialog to edit generation hyperparameters."""
+
+    def __init__(
+        self,
+        *,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        alpha_f: float,
+        alpha_p: float,
+    ) -> None:
+        super().__init__(id="chat-gen-config-modal")
+        self._defaults = {
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+            "alpha_f": alpha_f,
+            "alpha_p": alpha_p,
+        }
+        self._inputs: dict[str, Input] = {}
+        self._status: Optional[Label] = None
+
+    def compose(self) -> ComposeResult:
+        with Container(id="chat-gen-config-modal-container"):
+            yield Label("Generation Config", id="chat-gen-config-title")
+            yield Label("temperature", classes="chat-gen-config-label")
+            temp_input = Input(id="chat-gen-config-temperature", placeholder="e.g. 0.7")
+            self._inputs["temperature"] = temp_input
+            yield temp_input
+
+            yield Label("top_k", classes="chat-gen-config-label")
+            top_k_input = Input(id="chat-gen-config-top-k", placeholder="e.g. 40")
+            self._inputs["top_k"] = top_k_input
+            yield top_k_input
+
+            yield Label("top_p", classes="chat-gen-config-label")
+            top_p_input = Input(id="chat-gen-config-top-p", placeholder="e.g. 0.9")
+            self._inputs["top_p"] = top_p_input
+            yield top_p_input
+
+            yield Label("alpha_f", classes="chat-gen-config-label")
+            alpha_f_input = Input(id="chat-gen-config-alpha-f", placeholder="e.g. 0.0")
+            self._inputs["alpha_f"] = alpha_f_input
+            yield alpha_f_input
+
+            yield Label("alpha_p", classes="chat-gen-config-label")
+            alpha_p_input = Input(id="chat-gen-config-alpha-p", placeholder="e.g. 0.0")
+            self._inputs["alpha_p"] = alpha_p_input
+            yield alpha_p_input
+
+            status = Label("", id="chat-gen-config-status")
+            self._status = status
+            yield status
+
+            with Container(id="chat-gen-config-buttons"):
+                yield Button("Cancel", id="chat-gen-config-cancel")
+                yield Button("Save", id="chat-gen-config-save", variant="primary")
+
+    def on_mount(self) -> None:
+        for key, widget in self._inputs.items():
+            widget.value = str(self._defaults[key])
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "chat-gen-config-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id != "chat-gen-config-save":
+            return
+
+        try:
+            temperature = float(self._inputs["temperature"].value.strip())
+            top_k = int(self._inputs["top_k"].value.strip())
+            top_p = float(self._inputs["top_p"].value.strip())
+            alpha_f = float(self._inputs["alpha_f"].value.strip())
+            alpha_p = float(self._inputs["alpha_p"].value.strip())
+        except ValueError:
+            self._set_status("Invalid number format.")
+            return
+
+        if temperature < 0:
+            self._set_status("temperature must be >= 0.")
+            return
+        if top_k < 0:
+            self._set_status("top_k must be >= 0.")
+            return
+        if not (0.0 <= top_p <= 1.0):
+            self._set_status("top_p must be between 0 and 1.")
+            return
+        if alpha_f < 0 or alpha_p < 0:
+            self._set_status("alpha_f and alpha_p must be >= 0.")
+            return
+
+        self.dismiss(
+            {
+                "temperature": temperature,
+                "top_k": top_k,
+                "top_p": top_p,
+                "alpha_f": alpha_f,
+                "alpha_p": alpha_p,
+            }
+        )
+
+    def _set_status(self, message: str) -> None:
+        if self._status is not None:
+            self._status.update(message)
 
 
 class ConfirmModal(ModalScreen[Optional[bool]]):

@@ -1,50 +1,51 @@
 from __future__ import annotations
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
 import tinygrad as tg
+try:
+    import torch
+except Exception:  # pragma: no cover - optional dependency
+    torch = None  # type: ignore[assignment]
 from transformers import AutoTokenizer
 
 from textual.widgets import RichLog
 
-from tiny_cheetah.models.llm.model import Model
+from tiny_cheetah.models.llm.backend import (
+    backend_helpers_module,
+    detect_quantization_mode as detect_quantization_mode_backend,
+)
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.models.llm.helpers import sample
-from tiny_cheetah.models.llm.quantize import is_quantized_model_config
 from tiny_cheetah.orchestration.model_engine import ModelEngine
 from tiny_cheetah.logging_utils import get_logger
 logger = get_logger(__name__)
+TokenCallback = Callable[[int], None]
 
 
 def detect_quantization_mode(model_config: Any) -> tuple[bool, str]:
-    if not isinstance(model_config, dict):
-        return False, "standard"
-    if not is_quantized_model_config(model_config):
-        return False, "standard"
+    return detect_quantization_mode_backend(model_config)
 
-    quantization_config = model_config.get("quantization_config")
-    if not isinstance(quantization_config, dict):
-        return True, "quantized"
 
-    quant_method = str(quantization_config.get("quant_method", "quantized")).lower()
-    quant_bits = "4-bit" if quantization_config.get("load_in_4bit") or quantization_config.get("_load_in_4bit") else (
-        "8-bit" if quantization_config.get("load_in_8bit") or quantization_config.get("_load_in_8bit") else ""
-    )
-    quant_type = str(quantization_config.get("bnb_4bit_quant_type", "")).lower()
+def _sample_with_backend(*args: Any, **kwargs: Any):
+    if args:
+        logits = args[0]
+        if torch is not None and isinstance(logits, torch.Tensor):
+            return backend_helpers_module("torch").sample(*args, **kwargs)
+        if isinstance(logits, tg.Tensor):
+            return backend_helpers_module("tinygrad").sample(*args, **kwargs)
 
-    parts = [quant_method]
-    if quant_bits:
-        parts.append(quant_bits)
-    if quant_type:
-        parts.append(quant_type)
-    return True, " ".join(parts)
+    # Fallback to configured backend, then tinygrad.
+    try:
+        return backend_helpers_module().sample(*args, **kwargs)
+    except Exception:
+        return backend_helpers_module("tinygrad").sample(*args, **kwargs)
 
 
 def streaming_generate(
-    model: Model,
-    input_ids: tg.Tensor,
-    attention_mask: tg.Tensor,
+    model: Any,
+    input_ids: Any,
+    attention_mask: Any,
     tokenizer: AutoTokenizer,
     max_new_tokens: int = 512,
     temp: float = 1.0,
@@ -52,8 +53,25 @@ def streaming_generate(
     top_p: float = 0.8,
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,
-    verbose: bool = False
+    verbose: bool = False,
+    on_token: TokenCallback | None = None,
 ) -> tuple[list[int], float]:
+    if torch is not None and isinstance(input_ids, torch.Tensor):
+        return _streaming_generate_torch(
+            model,
+            input_ids,
+            attention_mask,
+            tokenizer,
+            max_new_tokens=max_new_tokens,
+            temp=temp,
+            top_k=top_k,
+            top_p=top_p,
+            alpha_f=alpha_f,
+            alpha_p=alpha_p,
+            verbose=verbose,
+            on_token=on_token,
+        )
+
     device = input_ids.device
     input_ids = input_ids.to(device)
     attention_mask = attention_mask.to(device)
@@ -67,8 +85,10 @@ def streaming_generate(
     position_ids = ((attention_mask.cumsum(axis=1) - 1) * attention_mask).to(device)
     logits = model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
     next_logit = logits[:, -1, :].flatten()
-    tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+    tok = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
     out_tokens.append(tok)
+    if on_token is not None:
+        on_token(int(tok))
     generated += 1
     curr_pos += 1
 
@@ -91,8 +111,10 @@ def streaming_generate(
             position_ids=position_ids,
         )
         next_logit = logits[:, -1, :].flatten()
-        tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+        tok = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
         out_tokens.append(tok)
+        if on_token is not None:
+            on_token(int(tok))
         generated += 1
         curr_pos += 1
 
@@ -108,11 +130,10 @@ def streaming_generate(
     return out_tokens, elapsed
 
 
-def streaming_generate_with_peers(
-    peer_client: Any,
-    model: Model,
-    input_ids: tg.Tensor,
-    attention_mask: tg.Tensor,
+def _streaming_generate_torch(
+    model: Any,
+    input_ids: Any,
+    attention_mask: Any,
     tokenizer: AutoTokenizer,
     max_new_tokens: int = 512,
     temp: float = 1.0,
@@ -121,8 +142,112 @@ def streaming_generate_with_peers(
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,
     verbose: bool = False,
+    on_token: TokenCallback | None = None,
+) -> tuple[list[int], float]:
+    if torch is None:
+        raise RuntimeError("Torch tensor generation requested but torch is unavailable")
+
+    device = os.getenv("TC_DEVICE", "cpu")
+    input_ids = input_ids.to(device=device, dtype=torch.long)
+    attention_mask = attention_mask.to(device=device, dtype=torch.long)
+
+    out_tokens: list[int] = []
+    curr_pos = int(input_ids.shape[1] - 1)
+    position_ids = ((attention_mask.cumsum(dim=1) - 1) * attention_mask).to(
+        device=device,
+        dtype=torch.long,
+    )
+
+    logits = model(
+        input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+    next_logit = logits[:, -1, :].flatten()
+    tok_sample = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+    tok = int(tok_sample.item())
+    out_tokens.append(tok)
+    if on_token is not None:
+        on_token(tok)
+
+    start_time = time.time()
+    generated = 1
+    curr_pos += 1
+    eos_hit = tok == tokenizer.eos_token_id
+    limit = max_new_tokens - 1 if max_new_tokens > 0 else None
+
+    while not eos_hit:
+        if limit is not None and generated >= limit:
+            break
+
+        next_tok = torch.tensor([[tok]], device=device, dtype=torch.long)
+        attention_mask = torch.cat(
+            (
+                attention_mask,
+                torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=device),
+            ),
+            dim=1,
+        )
+        position_ids = torch.tensor([curr_pos], device=device, dtype=torch.long)
+        logits = model(
+            next_tok,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        next_logit = logits[:, -1, :].flatten()
+        tok_sample = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+        tok = int(tok_sample.item())
+        out_tokens.append(tok)
+        if on_token is not None:
+            on_token(tok)
+        generated += 1
+        curr_pos += 1
+        eos_hit = tok == tokenizer.eos_token_id
+
+    elapsed = time.time() - start_time
+    if verbose:
+        tok_s = generated / elapsed if elapsed > 0 else float("inf")
+        print(f"[stream] {generated} tokens in {elapsed:.3f}s -> {tok_s:.2f} tok/s")
+    return out_tokens, elapsed
+
+
+def streaming_generate_with_peers(
+    peer_client: Any,
+    model: Any,
+    input_ids: Any,
+    attention_mask: Any,
+    tokenizer: AutoTokenizer,
+    max_new_tokens: int = 512,
+    temp: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 0.8,
+    alpha_f: float = 0.0,
+    alpha_p: float = 0.0,
+    verbose: bool = False,
+    on_token: TokenCallback | None = None,
 ) -> tuple[list[int], float]:
     peers = peer_client.get_peers(include_self=True) if peer_client is not None else []
+    is_torch_input = torch is not None and isinstance(input_ids, torch.Tensor)
+
+    if is_torch_input and len(peers) > 1:
+        logger.warning(
+            "Torch backend peer token streaming is not implemented; falling back to local torch generation."
+        )
+        return streaming_generate(
+            model,
+            input_ids,
+            attention_mask,
+            tokenizer,
+            max_new_tokens,
+            temp,
+            top_k,
+            top_p,
+            alpha_f,
+            alpha_p,
+            verbose,
+            on_token,
+        )
+
     if not peers or len(peers) <= 1:
         return streaming_generate(
             model,
@@ -136,6 +261,7 @@ def streaming_generate_with_peers(
             alpha_f,
             alpha_p,
             verbose,
+            on_token,
         )
 
     engine = _local_engine(model)
@@ -145,10 +271,9 @@ def streaming_generate_with_peers(
     mask_list = _tensor_to_list(attention_mask)
     position_list = [[0]]
     hidden_state_list = []
-    
+
     out_tokens: list[int] = []
     start_time = time.time()
-    failed = False
 
     for step in range(max_new_tokens):
         logger.debug(f"[step: {step} Starting distributed generation with {len(peers)} peers for up to {max_new_tokens} tokens")
@@ -176,6 +301,7 @@ def streaming_generate_with_peers(
             position_list,
             hidden_state_list,
             out_tokens,
+            on_token=on_token,
         )
 
         for peer in peers:
@@ -219,6 +345,7 @@ def streaming_generate_with_peers(
                 position_list,
                 hidden_state_list,
                 out_tokens,
+                on_token=on_token,
             )
             
             if end_token:
@@ -254,7 +381,7 @@ def _extract_token(engine: ModelEngine, response: Any, tokenizer: AutoTokenizer)
     return int(token), end_token
 
 
-def _plan_peer_shards(model_engine: ModelEngine, peer_client: Any, model: Model) -> None:
+def _plan_peer_shards(model_engine: ModelEngine, peer_client: Any, model: Any) -> None:
     if peer_client is None:
         return
     peers = peer_client.get_peers(include_self=True)
@@ -276,6 +403,7 @@ def _apply_token_data(
     position_list: list[list[int]],
     hidden_state_list: list[list[Any]],
     out_tokens: list[int],
+    on_token: TokenCallback | None = None,
 ) -> tuple[list[list[int]], list[list[int]], list[list[Any]], bool]:
     msg = engine.recv_tokens(otoken_data, tokenizer)
     attention_mask = msg.get("attention_mask")
@@ -291,6 +419,8 @@ def _apply_token_data(
     if token is not None:
         tok = int(token)
         out_tokens.append(tok)
+        if on_token is not None:
+            on_token(tok)
         input_list[0].append(tok)
         if mask_list:
             mask_list[0].append(1)
@@ -304,7 +434,7 @@ def _apply_token_data(
     return mask_list, position_list, hidden_state_list, end_token
 
 
-def _infer_total_layers(model: Model) -> int:
+def _infer_total_layers(model: Any) -> int:
     config = getattr(model, "config", {}) or {}
     num_layers = config.get("num_layers")
     if num_layers is None:
@@ -321,7 +451,7 @@ def _infer_total_layers(model: Model) -> int:
     return num_layers_int + 1
 
 
-def _local_engine(model: Model) -> ModelEngine:
+def _local_engine(model: Any) -> ModelEngine:
     shard = getattr(model, "shard", None)
     if shard is not None:
         return ModelEngine(shard=shard)

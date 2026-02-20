@@ -7,9 +7,9 @@ import time
 from transformers import AutoTokenizer
 import tinygrad as tg
 
-from tiny_cheetah.models.llm.model import Model
-from tiny_cheetah.models.llm.helpers import sample
-from tiny_cheetah.models.llm.quantize import is_quantized_model_config, load_quantized_safetensors
+from tiny_cheetah.models.llm.tinygrad.model import Model
+from tiny_cheetah.models.llm.tinygrad.helpers import sample
+from tiny_cheetah.models.llm.tinygrad.quantize import is_quantized_model_config, load_quantized_safetensors
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.repos import RepoCustom
 

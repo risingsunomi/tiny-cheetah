@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Sequence
 import numpy as np
 import tinygrad as tg
 
+from tiny_cheetah.models.llm.backend import backend_helpers_module
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.models.llm.helpers import sample
 
 
 class ModelEngine:
@@ -67,7 +67,7 @@ class ModelEngine:
             }
 
         next_logit = model_output[:, -1, :].flatten()
-        tok = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+        tok = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
         end_token = bool(getattr(tokenizer, "eos_token_id", None) == tok)
 
         return {
@@ -162,6 +162,15 @@ def _to_float(val: Any) -> float:
         return float(val)
     except Exception:
         return 0.0
+
+
+def _sample_with_backend(*args: Any, **kwargs: Any):
+    # Distributed generation is tinygrad-based today, but resolve through backend utility
+    # so we don't hardcode tinygrad module paths in callers.
+    try:
+        return backend_helpers_module().sample(*args, **kwargs)
+    except Exception:
+        return backend_helpers_module("tinygrad").sample(*args, **kwargs)
 
 
 def _encode_token_tensor(token: int) -> Dict[str, Any]:

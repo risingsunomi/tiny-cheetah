@@ -5,8 +5,8 @@ import time
 import tinygrad as tg
 from transformers import AutoTokenizer
 
-from tiny_cheetah.models.llm.model import Model
-from tiny_cheetah.models.llm.helpers import load_safetensors, sample, generate
+from tiny_cheetah.models.llm.tinygrad.model import Model
+from tiny_cheetah.models.llm.tinygrad.helpers import load_safetensors, sample, generate
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.repos import RepoHuggingFace
 

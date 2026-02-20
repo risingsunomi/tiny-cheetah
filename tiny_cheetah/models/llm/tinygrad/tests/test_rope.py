@@ -1,7 +1,7 @@
 import unittest
 
 import tinygrad
-from models.llm.rope import RotaryPositionalEmbedding
+from tiny_cheetah.models.llm.tinygrad.rope import RotaryPositionalEmbedding
 
 class TestRotaryPositionalEmbedding(unittest.TestCase):
 
