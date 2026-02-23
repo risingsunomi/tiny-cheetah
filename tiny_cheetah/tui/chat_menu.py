@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import os
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -25,6 +26,7 @@ from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 from textual.app import ComposeResult
 from textual.containers import Container
 from textual.events import Mount
+from textual.geometry import Size
 from textual.message import Message
 from textual.message_pump import MessagePump
 from textual.screen import Screen, ModalScreen
@@ -45,6 +47,8 @@ from tiny_cheetah.logging_utils import get_logger
 
 logger = get_logger(__name__)
 MAX_RESTORED_MESSAGES = 20
+MAX_SEQ_LEN = 2048
+MAX_RESP_LEN = 192
 
 class ChatModelSelected(Message):
     def __init__(self, sender: MessagePump, model_id: str) -> None:
@@ -248,6 +252,95 @@ class ChatScreen(Screen[None]):
             "alpha_p": _as_float(self._gen_overrides.get("alpha_p", 0.0), 0.0),
         }
 
+    def _context_window_tokens(self) -> int:
+        config = self._model_config if isinstance(self._model_config, dict) else {}
+        configured = config.get("max_seq_len", MAX_SEQ_LEN)
+        
+        try:
+            context_window = int(configured)
+        except (TypeError, ValueError):
+            context_window = MAX_SEQ_LEN
+        
+        if context_window <= 0:
+            context_window = MAX_SEQ_LEN
+
+        return context_window
+
+    def _response_reserve_tokens(self, context_window: int) -> int:
+        reserve = os.getenv("TC_MAX_RESP_LEN", MAX_RESP_LEN)
+        return max(1, min(reserve, context_window - 1))
+
+    def _token_count_for_messages(self, messages: List[dict[str, str]]) -> int:
+        if self._tokenizer is None:
+            return 0
+        template = self._tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        enc = self._tokenizer(template, return_tensors="np")
+        return int(enc["input_ids"].shape[1])
+
+    def _prepare_generation_prompt(
+        self,
+    ) -> tuple[Dict[str, Any], int]:
+        if self._tokenizer is None:
+            raise RuntimeError("Tokenizer is not loaded")
+
+        context_window = self._context_window_tokens()
+        reserve = self._response_reserve_tokens(context_window)
+        input_budget = max(1, context_window - reserve)
+
+        # Keep most recent turns that fit budget.
+        selected: List[dict[str, str]] = []
+        for message in reversed(self._history):
+            candidate = [message, *selected]
+            candidate_tokens = self._token_count_for_messages(candidate)
+            if candidate_tokens <= input_budget or not selected:
+                selected = candidate
+                continue
+            break
+        logger.debug("Selected messages for prompt: %s", selected)
+        template = self._tokenizer.apply_chat_template(
+            selected,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        enc = self._tokenizer(template, return_tensors="np")
+        input_ids = enc["input_ids"]
+        attention_mask = enc["attention_mask"]
+        prompt_tokens = int(input_ids.shape[1])
+
+        # Last-resort clamp if a single recent message is still too long.
+        if prompt_tokens > input_budget:
+            input_ids = input_ids[:, -input_budget:]
+            attention_mask = attention_mask[:, -input_budget:]
+            prompt_tokens = input_budget
+
+        if selected and selected != self._history:
+            self._history = selected
+
+        max_new_tokens = max(1, min(reserve, context_window - prompt_tokens))
+        logger.debug(
+            "Prepared prompt tokens=%d context=%d reserve=%d max_new=%d history=%d",
+            prompt_tokens,
+            context_window,
+            reserve,
+            max_new_tokens,
+            len(self._history),
+        )
+        return {"input_ids": input_ids, "attention_mask": attention_mask}, max_new_tokens
+
+    def _trim_history_for_context(self) -> None:
+        # Use the same token-budget logic as generation to keep only model-relevant history.
+        if self._tokenizer is None or not self._history:
+            return
+        try:
+            self._prepare_generation_prompt()
+        except Exception:
+            # If tokenizer/template fails, keep existing history unchanged.
+            return
+
     def _handle_model_selected(self, result: Optional[str]) -> None:
         if not result:
             return
@@ -269,8 +362,13 @@ class ChatScreen(Screen[None]):
 
     def action_pop_screen(self) -> None:
         """Allow Esc/b bindings to exit the chat screen cleanly."""
-        self._clear_model(persist=False)
         self.app.pop_screen()
+        # Defer model cleanup so screen pop isn't blocked by tensor teardown.
+        asyncio.create_task(self._clear_model_after_pop())
+
+    async def _clear_model_after_pop(self) -> None:
+        await asyncio.sleep(0)
+        self._clear_model(persist=False, reset_kv_cache=False)
 
     def _get_peer_count(self) -> None:
         if self.app is None:
@@ -281,9 +379,25 @@ class ChatScreen(Screen[None]):
             new_title = f"[Nodes: {count}]"
             if new_title != current:
                 self.app.title = new_title
+    
+    def _instruct_begin_chat(self) -> None:
+        for history in self._history:
+            if history["role"] in {"system", "user"}:
+                return
+
+        context_window = self._context_window_tokens()
+        self._history.append({
+            "role": "system",
+            "content": (
+                "You are a helpful assistant. Keep responses concise and stay within "
+                f"the active context window ({context_window} tokens)."
+            ),
+        })
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":
+            self._instruct_begin_chat()
+            
             content = event.value.strip()
             if not content:
                 return
@@ -313,7 +427,6 @@ class ChatScreen(Screen[None]):
             self._generating_resp = True
             
             asyncio.create_task(self._run_generation())
-            self.apprefresh()
 
     async def _run_generation(self) -> None:
         if (
@@ -353,10 +466,14 @@ class ChatScreen(Screen[None]):
             self._finalize_model_stream(reply)
         finally:
             self._generating_resp = False
+            if self._chat_log is not None:
+                # Nudge focus/refresh so final streamed text is painted reliably.
+                self._chat_log.focus()
+                self._chat_log.refresh()
             if self._chat_input is not None:
                 self._chat_input.placeholder = ""
                 self._set_chat_input_enabled(True)
-                self._chat_input.focus()
+                self.call_after_refresh(self._chat_input.focus)
 
     def _append_user(
         self,
@@ -459,9 +576,13 @@ class ChatScreen(Screen[None]):
                 line_cache = getattr(log, "_line_cache", None)
                 if line_cache is not None:
                     line_cache.clear()
+                # Keep RichLog internals consistent after manual line removal.
+                widest = int(getattr(log, "_widest_line_width", 0))
+                log.virtual_size = Size(widest, len(log.lines))
         before = len(log.lines)
         log.write(self._streaming_reply_prefix + escape(self._streaming_reply_text))
         self._streaming_rendered_lines = max(0, len(log.lines) - before)
+        log.refresh()
         log.scroll_end(animate=False, force=True)
 
     def _finish_model_stream_line(self) -> None:
@@ -484,18 +605,18 @@ class ChatScreen(Screen[None]):
             self._render_stream_line()
 
         self._finish_model_stream_line()
+        # Visual break between assistant messages.
+        self._write_to_chat_log("\n")
         entry_time = self._streaming_reply_timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._record_message("assistant", final_reply, entry_time)
         self._history.append({"role": "assistant", "content": final_reply})
-        if len(self._history) > 6:
-            self._history = self._history[-6:]
+        self._trim_history_for_context()
         self._streaming_reply_timestamp = None
         self._streamed_chars = 0
 
     def _stream_model_token_from_thread(self, token: int) -> None:
         piece = self._decode_token_piece(token)
         if not piece:
-            self.app.refresh()
             return
         self.app.call_from_thread(self._append_model_stream_chunk, piece)
 
@@ -504,6 +625,7 @@ class ChatScreen(Screen[None]):
         if tokenizer is None:
             return ""
         if token == tokenizer.eos_token_id:
+            self.refresh()
             return ""
         try:
             return tokenizer.decode(
@@ -771,8 +893,7 @@ class ChatScreen(Screen[None]):
                 self._history.append({"role": "assistant", "content": content})
             else:
                 self._append_system(content=content, persist=persist, timestamp=timestamp)
-        if len(self._history) > 6:
-            self._history = self._history[-6:]
+        self._trim_history_for_context()
 
     async def _update_current_log_model_async(self) -> None:
         if self._current_log_id is None:
@@ -848,31 +969,28 @@ class ChatScreen(Screen[None]):
         self,
         on_token: Optional[Callable[[int], None]] = None,
     ) -> tuple[list[int], float]:
-        max_new_tokens = self._model_config.get("max_seq_len", 4096)
+        enc, max_new_tokens = self._prepare_generation_prompt()
         if self._llm_backend == "torch":
             return self._generate_response_torch(
+                enc=enc,
                 max_new_tokens=max_new_tokens,
                 on_token=on_token,
             )
         return self._generate_response_tinygrad(
+            enc=enc,
             max_new_tokens=max_new_tokens,
             on_token=on_token,
         )
 
     def _generate_response_tinygrad(
         self,
+        enc: Dict[str, Any],
         max_new_tokens: int = 4096,
         on_token: Optional[Callable[[int], None]] = None,
     ) -> tuple[list[int], float]:
         import tinygrad as tg
         from tiny_cheetah.tui.helpers import streaming_generate_with_peers
 
-        template = self._tokenizer.apply_chat_template(
-            self._history,
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        enc = self._tokenizer(template, return_tensors="np")
         input_ids = tg.Tensor(enc["input_ids"])
         attention_mask = tg.Tensor(enc["attention_mask"])
 
@@ -911,18 +1029,13 @@ class ChatScreen(Screen[None]):
 
     def _generate_response_torch(
         self,
+        enc: Dict[str, Any],
         max_new_tokens: int = 4096,
         on_token: Optional[Callable[[int], None]] = None,
     ) -> tuple[list[int], float]:
         import torch
         from tiny_cheetah.tui.helpers import streaming_generate_with_peers
 
-        template = self._tokenizer.apply_chat_template(
-            self._history,
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        enc = self._tokenizer(template, return_tensors="np")
         input_ids = torch.tensor(enc["input_ids"], dtype=torch.long)
         attention_mask = torch.tensor(enc["attention_mask"], dtype=torch.long)
 
@@ -959,15 +1072,21 @@ class ChatScreen(Screen[None]):
             raise RuntimeError("streaming_generate_with_peers returned no output")
         return result
 
-    def _clear_model(self, *, persist: bool = False) -> None:
+    def _clear_model(self, *, persist: bool = False, reset_kv_cache: bool = False) -> None:
         if persist:
             self._log_sys_msg("Clearing loaded model.", persist=True)
-        if hasattr(self, "_model") and self._model is not None and hasattr(self._model, "reset_kv_cache"):
+        if (
+            reset_kv_cache
+            and hasattr(self, "_model")
+            and self._model is not None
+            and hasattr(self._model, "reset_kv_cache")
+        ):
             self._model.reset_kv_cache()
         self._model = None
         self._model_config = None
         self._tokenizer = None
         self._model_cache_path = None
+        self._model_loaded = False
         self._model_is_quantized = False
         self._torch_peer_notice_shown = False
         self._history.clear()
@@ -979,8 +1098,7 @@ class ChatScreen(Screen[None]):
         self._streaming_reply_prefix = ""
         self._streaming_rendered_lines = 0
         self._set_chat_input_enabled(True)
-        if not self._model_loaded:
-            self._set_load_button_enabled(True)
+        self._set_load_button_enabled(True)
         if persist:
             self._log_sys_msg("Model cleared. Select and load a model to continue.", persist=persist)
 

@@ -372,15 +372,6 @@ def _tensor_to_list(tensor: Any) -> list[list[Any]]:
     return [data]
 
 
-def _extract_token(engine: ModelEngine, response: Any, tokenizer: AutoTokenizer) -> tuple[int | None, bool]:
-    msg = engine.recv_tokens(response, tokenizer)
-    token = msg.get("token")
-    if token is None:
-        return None, False
-    end_token = bool(msg.get("end_token", token == tokenizer.eos_token_id))
-    return int(token), end_token
-
-
 def _plan_peer_shards(model_engine: ModelEngine, peer_client: Any, model: Any) -> None:
     if peer_client is None:
         return
