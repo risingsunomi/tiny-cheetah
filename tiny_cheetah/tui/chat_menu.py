@@ -22,6 +22,7 @@ from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
 from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
+from tiny_cheetah.tui.helpers import MemoryPressureError, memory_abort_reason
 
 from textual.app import ComposeResult
 from textual.containers import Container
@@ -148,6 +149,7 @@ class ChatScreen(Screen[None]):
         if self._model_label is not None:
             self._model_label.update(self._model_id or "<select>")
         await self._initialize_chat_logs()
+        self._peer_client.set_generate_handler(self._handle_peer_generate_token_request)
         # Slow down peer discovery to avoid UI pauses while typing.
         await asyncio.to_thread(self._get_peer_count)
         self.set_interval(5.0, self._get_peer_count)
@@ -156,7 +158,7 @@ class ChatScreen(Screen[None]):
         self._open_model_picker()
 
     def action_open_orchestration(self) -> None:
-        self.app.push_screen(OrchestrationScreen())
+        self.app.push_screen(OrchestrationScreen(self._peer_client))
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "open-model-picker":
@@ -191,7 +193,7 @@ class ChatScreen(Screen[None]):
         elif event.button.id == "load-chat-log":
             await self._load_selected_chat_log()
         elif event.button.id == "open-orchestration":
-            self.app.push_screen(OrchestrationScreen())
+            self.app.push_screen(OrchestrationScreen(self._peer_client))
         elif event.button.id == "rename-chat-log":
             self._prompt_rename_selected_log()
         elif event.button.id == "delete-chat-log":
@@ -429,22 +431,18 @@ class ChatScreen(Screen[None]):
             asyncio.create_task(self._run_generation())
 
     async def _run_generation(self) -> None:
-        if (
-            self._llm_backend == "torch"
-            and self._peer_client.peer_count() > 1
-            and not self._torch_peer_notice_shown
-        ):
-            self._log_sys_msg(
-                "Torch backend currently runs local generation only; peer token streaming remains tinygrad-only."
-            )
-            self._torch_peer_notice_shown = True
-
         try:
             try:
                 out_tokens, elapsed = await asyncio.to_thread(
                     self._generate_response,
                     self._stream_model_token_from_thread,
                 )
+            except MemoryPressureError as exc:
+                self._finish_model_stream_line()
+                self._streaming_reply_timestamp = None
+                self._streamed_chars = 0
+                self._log_sys_msg(str(exc))
+                return
             except Exception as exc:
                 self._finish_model_stream_line()
                 self._streaming_reply_timestamp = None
@@ -635,6 +633,102 @@ class ChatScreen(Screen[None]):
             )
         except TypeError:
             return tokenizer.decode([token], skip_special_tokens=True)
+
+    def _handle_peer_generate_token_request(self, message: dict) -> dict:
+        payload = message.get("payload", {})
+        if not isinstance(payload, dict):
+            return {"error": "invalid payload"}
+        if self._model is None or self._tokenizer is None:
+            return {"error": "model not loaded"}
+
+        from tiny_cheetah.models.shard import Shard
+        from tiny_cheetah.orchestration.model_engine import ModelEngine
+
+        backend = "torch" if self._llm_backend == "torch" else "tinygrad"
+
+        try:
+            input_ids_data = self._payload_to_2d_list(payload.get("input_ids"))
+            attention_mask_data = self._payload_to_2d_list(payload.get("attention_mask"))
+            hidden_state_data = self._payload_to_2d_list(payload.get("hidden_state"))
+            hidden_state = None if hidden_state_data in ([], [[]]) else self._payload_to_tensor(
+                hidden_state_data,
+                backend=backend,
+                integer=False,
+            )
+
+            input_ids = self._payload_to_tensor(input_ids_data, backend=backend, integer=True)
+            attention_mask = self._payload_to_tensor(attention_mask_data, backend=backend, integer=True)
+
+            shard = getattr(self._model, "shard", None)
+            shard_payload = payload.get("shard")
+            if isinstance(shard_payload, dict):
+                model_name = str(
+                    shard_payload.get("model_name")
+                    or getattr(shard, "model_name", "")
+                    or self._model_id
+                    or "model"
+                )
+                start_layer = int(shard_payload.get("start_layer", getattr(shard, "start_layer", 0)) or 0)
+                end_layer = int(shard_payload.get("end_layer", getattr(shard, "end_layer", 0)) or 0)
+                total_layers = int(
+                    shard_payload.get("total_layers", getattr(shard, "total_layers", end_layer)) or end_layer
+                )
+                shard = Shard(model_name, start_layer, end_layer, total_layers)
+
+            engine = ModelEngine(shard=shard) if shard is not None else ModelEngine()
+            return engine.get_tokens(
+                self._model,
+                input_ids,
+                attention_mask,
+                self._tokenizer,
+                hidden_state=hidden_state,
+                temp=float(payload.get("temp", 1.0) or 1.0),
+                top_k=int(payload.get("top_k", 0) or 0),
+                top_p=float(payload.get("top_p", 0.8) or 0.8),
+                alpha_f=float(payload.get("alpha_f", 0.0) or 0.0),
+                alpha_p=float(payload.get("alpha_p", 0.0) or 0.0),
+            )
+        except Exception as exc:
+            logger.exception("Peer token generation failed: %s", exc)
+            return {"error": str(exc)}
+
+    @staticmethod
+    def _payload_to_2d_list(value: Any) -> list[list[Any]]:
+        if value is None:
+            return [[]]
+        if isinstance(value, list):
+            if not value:
+                return [[]]
+            if isinstance(value[0], list):
+                return value
+            return [value]
+        return [[]]
+
+    def _payload_to_tensor(self, data: list[list[Any]], *, backend: str, integer: bool) -> Any:
+        if backend == "torch":
+            import torch
+
+            device = self._torch_runtime_device()
+            dtype = torch.long if integer else torch.float32
+            return torch.tensor(data, dtype=dtype, device=device)
+
+        import tinygrad as tg
+
+        dtype = tg.dtypes.int32 if integer else None
+        device = os.getenv("TC_DEVICE", "CPU")
+        tensor = tg.Tensor(data, device=device)
+        if dtype is not None:
+            tensor = tensor.cast(dtype)
+        return tensor
+
+    @staticmethod
+    def _torch_runtime_device() -> str:
+        device = str(os.getenv("TC_DEVICE", "cpu")).strip().lower()
+        if device in {"metal", "mps"}:
+            return "mps"
+        if device.startswith("cuda"):
+            return device
+        return "cpu"
 
     def _record_message(self, role: str, content: str, timestamp: str) -> None:
         if self._current_log_id is None:
@@ -1020,6 +1114,7 @@ class ChatScreen(Screen[None]):
                 alpha_f,
                 alpha_p,
                 on_token=on_token,
+                abort_check=self._memory_abort_reason,
             )
         finally:
             self._peer_client.in_use = False
@@ -1036,8 +1131,9 @@ class ChatScreen(Screen[None]):
         import torch
         from tiny_cheetah.tui.helpers import streaming_generate_with_peers
 
-        input_ids = torch.tensor(enc["input_ids"], dtype=torch.long)
-        attention_mask = torch.tensor(enc["attention_mask"], dtype=torch.long)
+        device = self._torch_runtime_device()
+        input_ids = torch.tensor(enc["input_ids"], dtype=torch.long, device=device)
+        attention_mask = torch.tensor(enc["attention_mask"], dtype=torch.long, device=device)
 
         if hasattr(self._model, "reset_kv_cache"):
             self._model.reset_kv_cache()
@@ -1065,12 +1161,16 @@ class ChatScreen(Screen[None]):
                 alpha_f,
                 alpha_p,
                 on_token=on_token,
+                abort_check=self._memory_abort_reason,
             )
         finally:
             self._peer_client.in_use = False
         if result is None:
             raise RuntimeError("streaming_generate_with_peers returned no output")
         return result
+
+    def _memory_abort_reason(self) -> str | None:
+        return memory_abort_reason("chat generation")
 
     def _clear_model(self, *, persist: bool = False, reset_kv_cache: bool = False) -> None:
         if persist:

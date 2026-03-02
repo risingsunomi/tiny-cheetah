@@ -8,6 +8,7 @@ from textual.widgets import Header, Button, Label
 from textual.containers import Container, Center
 
 from .chat_menu import ChatScreen
+from .agent_screen import AgentScreen
 from .train_menu import TrainScreen
 from .orchestration_screen import OrchestrationScreen
 from .settings_screen import SettingsScreen
@@ -43,6 +44,7 @@ class MainMenu(App):
 
         with Container(id="menu-btns"):
             yield Button("Chat", id="chat-btn")
+            yield Button("Agent", id="agent-btn")
             yield Button("Train", id="train-btn")
             yield Button("Network", id="network-btn")
             yield Button("Settings", id="settings-btn")
@@ -64,6 +66,10 @@ class MainMenu(App):
             defaults = getattr(self, "training_defaults", {}) or {}
             default_model = self.chat_default or defaults.get("model-id") or defaults.get("custom-model-id")
             self.push_screen(ChatScreen(default_model=default_model, offline=self.offline_mode, peer_client=self._peer_client))
+        elif button_id == "agent-btn":
+            defaults = getattr(self, "training_defaults", {}) or {}
+            default_model = self.chat_default or defaults.get("model-id") or defaults.get("custom-model-id")
+            self.push_screen(AgentScreen(default_model=default_model, offline=self.offline_mode, peer_client=self._peer_client))
         elif button_id == "train-btn":
             screen = TrainScreen(peer_client=self._peer_client, offline_mode=self.offline_mode)
             defaults = getattr(self, "training_defaults", None)

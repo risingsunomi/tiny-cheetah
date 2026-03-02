@@ -23,6 +23,7 @@ from rich.markup import escape
 
 from tiny_cheetah.tui.training_path_types import TrainingNode, NODE_STATUS_STYLES, NODE_STATUS_SYMBOLS
 from tiny_cheetah.tui.training_path_screen import TrainingPathScreen
+from tiny_cheetah.tui.helpers import memory_abort_reason
 try:
     import psutil  # type: ignore
 except Exception:  # pragma: no cover - psutil is optional at runtime
@@ -183,6 +184,7 @@ class TrainScreen(Screen[None]):
         self._path_summary_label: Optional[Label] = None
         self._auto_training_runs = 1
         self._stopped_by_user = False
+        self._stopped_for_memory = False
         self._peer_client = peer_client
         self._peer_label: Optional[Label] = None
         self._sync_base_node_name()
@@ -393,6 +395,12 @@ class TrainScreen(Screen[None]):
             self._append_log("[warn] Training is already running.")
             return
 
+        guard_reason = memory_abort_reason("training startup")
+        if guard_reason:
+            self._append_log(f"[error] {guard_reason}")
+            self._append_log("[error] Training start blocked by memory guard.")
+            return
+
         args = self._collect_args()
         if args is None:
             return
@@ -408,6 +416,7 @@ class TrainScreen(Screen[None]):
             return
 
         self._training = TrainingProcess(script_path, args)
+        self._stopped_for_memory = False
         try:
             self._training.start()
         except Exception as exc:  # pragma: no cover - defensive
@@ -508,6 +517,14 @@ class TrainScreen(Screen[None]):
                 self._poll_timer.pause()
             return
 
+        if self._training.is_running():
+            guard_reason = memory_abort_reason("training loop")
+            if guard_reason:
+                self._stopped_for_memory = True
+                self._training.terminate()
+                self._append_log(f"[error] {guard_reason}")
+                self._append_log("[error] Terminating training process to avoid out-of-memory crash.")
+
         for line in self._training.drain():
             if line is None:
                 self._handle_training_complete()
@@ -526,10 +543,14 @@ class TrainScreen(Screen[None]):
         if self._current_node_index is not None:
             if self._stopped_by_user:
                 self._set_node_status(self._current_node_index, "stopped")
+            elif self._stopped_for_memory:
+                self._set_node_status(self._current_node_index, "stopped")
+                self._append_log("[warn] Training step stopped by memory guard.")
             else:
                 self._set_node_status(self._current_node_index, "complete")
             self._current_node_index = None
         self._stopped_by_user = False
+        self._stopped_for_memory = False
 
     def _append_log(self, line: str) -> None:
         if self._log is None:

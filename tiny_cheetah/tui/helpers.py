@@ -5,6 +5,10 @@ from typing import Any, Callable
 
 import tinygrad as tg
 try:
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    psutil = None  # type: ignore[assignment]
+try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
     torch = None  # type: ignore[assignment]
@@ -21,6 +25,71 @@ from tiny_cheetah.orchestration.model_engine import ModelEngine
 from tiny_cheetah.logging_utils import get_logger
 logger = get_logger(__name__)
 TokenCallback = Callable[[int], None]
+AbortCheck = Callable[[], str | None]
+
+
+class MemoryPressureError(RuntimeError):
+    """Raised when memory guard thresholds are exceeded during long-running loops."""
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bytes_to_gib(value: float) -> float:
+    return value / (1024.0 ** 3)
+
+
+def memory_abort_reason(context: str = "") -> str | None:
+    """
+    Return a human-readable reason if memory pressure is too high, otherwise None.
+
+    Tunables:
+    - TC_MEM_MAX_PERCENT (default 92)
+    - TC_SWAP_MAX_PERCENT (default 90)
+    - TC_MEM_MIN_AVAILABLE_GB (default 0.75)
+    """
+    if psutil is None:
+        return None
+
+    mem = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+    max_mem_percent = _env_float("TC_MEM_MAX_PERCENT", 92.0)
+    max_swap_percent = _env_float("TC_SWAP_MAX_PERCENT", 90.0)
+    min_available_gb = _env_float("TC_MEM_MIN_AVAILABLE_GB", 0.75)
+    available_gb = _bytes_to_gib(float(mem.available))
+
+    reasons: list[str] = []
+    if float(mem.percent) >= max_mem_percent:
+        reasons.append(f"RAM usage {float(mem.percent):.1f}% >= {max_mem_percent:.1f}%")
+    if float(swap.percent) >= max_swap_percent:
+        reasons.append(f"Swap usage {float(swap.percent):.1f}% >= {max_swap_percent:.1f}%")
+    if available_gb <= min_available_gb:
+        reasons.append(f"Available RAM {available_gb:.2f} GiB <= {min_available_gb:.2f} GiB")
+
+    if not reasons:
+        return None
+
+    label = f" ({context})" if context else ""
+    return (
+        f"Memory guard triggered{label}: {'; '.join(reasons)} "
+        f"[RAM {float(mem.percent):.1f}% used, swap {float(swap.percent):.1f}% used, "
+        f"available {available_gb:.2f} GiB]"
+    )
+
+
+def _raise_if_abort(abort_check: AbortCheck | None) -> None:
+    if abort_check is None:
+        return
+    reason = abort_check()
+    if reason:
+        raise MemoryPressureError(reason)
 
 
 def detect_quantization_mode(model_config: Any) -> tuple[bool, str]:
@@ -55,6 +124,7 @@ def streaming_generate(
     alpha_p: float = 0.0,
     verbose: bool = False,
     on_token: TokenCallback | None = None,
+    abort_check: AbortCheck | None = None,
 ) -> tuple[list[int], float]:
     if torch is not None and isinstance(input_ids, torch.Tensor):
         return _streaming_generate_torch(
@@ -70,8 +140,10 @@ def streaming_generate(
             alpha_p=alpha_p,
             verbose=verbose,
             on_token=on_token,
+            abort_check=abort_check,
         )
 
+    _raise_if_abort(abort_check)
     device = input_ids.device
     input_ids = input_ids.to(device)
     attention_mask = attention_mask.to(device)
@@ -96,6 +168,7 @@ def streaming_generate(
     limit = max_new_tokens - 1 if max_new_tokens > 0 else None
 
     while not eos_hit:
+        _raise_if_abort(abort_check)
         if limit is not None and generated >= limit:
             break
 
@@ -143,10 +216,12 @@ def _streaming_generate_torch(
     alpha_p: float = 0.0,
     verbose: bool = False,
     on_token: TokenCallback | None = None,
+    abort_check: AbortCheck | None = None,
 ) -> tuple[list[int], float]:
     if torch is None:
         raise RuntimeError("Torch tensor generation requested but torch is unavailable")
 
+    _raise_if_abort(abort_check)
     device = os.getenv("TC_DEVICE", "cpu")
     input_ids = input_ids.to(device=device, dtype=torch.long)
     attention_mask = attention_mask.to(device=device, dtype=torch.long)
@@ -177,6 +252,7 @@ def _streaming_generate_torch(
     limit = max_new_tokens - 1 if max_new_tokens > 0 else None
 
     while not eos_hit:
+        _raise_if_abort(abort_check)
         if limit is not None and generated >= limit:
             break
 
@@ -225,28 +301,10 @@ def streaming_generate_with_peers(
     alpha_p: float = 0.0,
     verbose: bool = False,
     on_token: TokenCallback | None = None,
+    abort_check: AbortCheck | None = None,
 ) -> tuple[list[int], float]:
-    peers = peer_client.get_peers(include_self=True) if peer_client is not None else []
-    is_torch_input = torch is not None and isinstance(input_ids, torch.Tensor)
-
-    if is_torch_input and len(peers) > 1:
-        logger.warning(
-            "Torch backend peer token streaming is not implemented; falling back to local torch generation."
-        )
-        return streaming_generate(
-            model,
-            input_ids,
-            attention_mask,
-            tokenizer,
-            max_new_tokens,
-            temp,
-            top_k,
-            top_p,
-            alpha_f,
-            alpha_p,
-            verbose,
-            on_token,
-        )
+    peers = _normalize_peer_entries(peer_client.get_peers(include_self=True)) if peer_client is not None else []
+    backend = "torch" if torch is not None and isinstance(input_ids, torch.Tensor) else "tinygrad"
 
     if not peers or len(peers) <= 1:
         return streaming_generate(
@@ -262,6 +320,29 @@ def streaming_generate_with_peers(
             alpha_p,
             verbose,
             on_token,
+            abort_check,
+        )
+
+    local_peer_id = str(getattr(peer_client, "peer_client_id", "") or "")
+    remote_peers = [
+        peer for peer in peers
+        if str(getattr(peer, "peer_client_id", "") or "") != local_peer_id
+    ]
+    if not remote_peers:
+        return streaming_generate(
+            model,
+            input_ids,
+            attention_mask,
+            tokenizer,
+            max_new_tokens,
+            temp,
+            top_k,
+            top_p,
+            alpha_f,
+            alpha_p,
+            verbose,
+            on_token,
+            abort_check,
         )
 
     engine = _local_engine(model)
@@ -276,10 +357,11 @@ def streaming_generate_with_peers(
     start_time = time.time()
 
     for step in range(max_new_tokens):
+        _raise_if_abort(abort_check)
         logger.debug(f"[step: {step} Starting distributed generation with {len(peers)} peers for up to {max_new_tokens} tokens")
         logger.debug(f"Initial input_ids: {input_list}, attention_mask: {mask_list}")
-        input_ids = tg.Tensor(input_list)
-        attention_mask = tg.Tensor(mask_list)
+        input_ids = _list_to_tensor(input_list, like=input_ids)
+        attention_mask = _list_to_tensor(mask_list, like=attention_mask)
         otoken_data = engine.get_tokens(
             model,
             input_ids,
@@ -301,10 +383,14 @@ def streaming_generate_with_peers(
             position_list,
             hidden_state_list,
             out_tokens,
+            backend=backend,
             on_token=on_token,
         )
 
-        for peer in peers:
+        if end_token:
+            break
+
+        for peer in remote_peers:
             payload = {
                 "command": "generate_token",
                 "payload": {
@@ -321,8 +407,11 @@ def streaming_generate_with_peers(
                 },
             }
             try:
-                logger.debug(f"Sending payload to peer {getattr(peer, 'peer_client_id', 'unknown')}: {payload}")
-                host = getattr(peer, "address", "0.0.0.0")
+                logger.debug(
+                    "Sending payload to peer %s",
+                    _peer_identifier(peer),
+                )
+                host = str(getattr(peer, "ip_address", "") or getattr(peer, "address", "0.0.0.0"))
                 port = int(getattr(peer, "port", os.getenv("TC_TENSOR_PORT", 1045)))
                 address = (host, port)
                 resp = peer_client.send_payload(
@@ -330,10 +419,10 @@ def streaming_generate_with_peers(
                     expect_reply=True,
                     address=address,
                 )
-                otoken_data = engine.recv_tokens(resp, tokenizer)
-                logger.debug(f"Received response from peer {getattr(peer, 'peer_client_id', 'unknown')}: {otoken_data}")
+                otoken_data = resp
+                logger.debug("Received token response from peer %s", _peer_identifier(peer))
             except Exception as err:
-                logger.error(f"Error communicating with peer {getattr(peer, 'peer_client_id', 'unknown')}: {err}")
+                logger.error(f"Error communicating with peer {_peer_identifier(peer)}: {err}")
                 break
 
             mask_list, position_list, hidden_state_list, end_token = _apply_token_data(
@@ -345,13 +434,20 @@ def streaming_generate_with_peers(
                 position_list,
                 hidden_state_list,
                 out_tokens,
+                backend=backend,
                 on_token=on_token,
             )
             
             if end_token:
                 break
 
+        if end_token:
+            break
+
     elapsed = time.time() - start_time
+    if verbose and out_tokens:
+        tok_s = len(out_tokens) / elapsed if elapsed > 0 else float("inf")
+        print(f"[stream-peers] {len(out_tokens)} tokens in {elapsed:.3f}s -> {tok_s:.2f} tok/s")
     return out_tokens, elapsed
 
 
@@ -364,7 +460,14 @@ def _tensor_to_list(tensor: Any) -> list[list[Any]]:
         if isinstance(tensor[0], list):
             return tensor
         return [tensor]
-    data = tensor.numpy().tolist()
+    if torch is not None and isinstance(tensor, torch.Tensor):
+        data = tensor.detach().cpu().numpy().tolist()
+    elif hasattr(tensor, "numpy"):
+        data = tensor.numpy().tolist()
+    elif hasattr(tensor, "tolist"):
+        data = tensor.tolist()
+    else:
+        data = []
     if not data:
         return [[]]
     if isinstance(data[0], list):
@@ -372,10 +475,31 @@ def _tensor_to_list(tensor: Any) -> list[list[Any]]:
     return [data]
 
 
+def _list_to_tensor(data: list[list[Any]], like: Any) -> Any:
+    if torch is not None and isinstance(like, torch.Tensor):
+        return torch.tensor(data, dtype=like.dtype, device=like.device)
+    device = getattr(like, "device", None)
+    return tg.Tensor(data, device=device)
+
+
+def _normalize_peer_entries(peers: Any) -> list[Any]:
+    normalized: list[Any] = []
+    for peer in peers or []:
+        if isinstance(peer, tuple) and len(peer) == 2:
+            normalized.append(peer[1])
+        else:
+            normalized.append(peer)
+    return normalized
+
+
+def _peer_identifier(peer: Any) -> str:
+    return str(getattr(peer, "peer_client_id", "") or getattr(peer, "ip_address", "") or "unknown")
+
+
 def _plan_peer_shards(model_engine: ModelEngine, peer_client: Any, model: Any) -> None:
     if peer_client is None:
         return
-    peers = peer_client.get_peers(include_self=True)
+    peers = _normalize_peer_entries(peer_client.get_peers(include_self=True))
     if len(peers) <= 1:
         return
     total_layers = _infer_total_layers(model)
@@ -394,9 +518,10 @@ def _apply_token_data(
     position_list: list[list[int]],
     hidden_state_list: list[list[Any]],
     out_tokens: list[int],
+    backend: str | None = None,
     on_token: TokenCallback | None = None,
 ) -> tuple[list[list[int]], list[list[int]], list[list[Any]], bool]:
-    msg = engine.recv_tokens(otoken_data, tokenizer)
+    msg = engine.recv_tokens(otoken_data, tokenizer, backend=backend)
     attention_mask = msg.get("attention_mask")
     position_ids = msg.get("position_ids")
     hidden_state = msg.get("hidden_state")

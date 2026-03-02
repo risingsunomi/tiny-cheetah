@@ -200,12 +200,17 @@ class PeerClient:
 
     # Connections ---------------------------------------------------------
     def get_peers(self, include_self: bool = False) -> List[CDevice]:
+        peers = [
+            peer
+            for peer_id, peer in self._peers.items()
+            if peer_id != self.peer_client_id
+        ]
         if include_self:
-            self._peers[self.peer_client_id] = self.peer_device
-        return self._peers.items()
+            return [self.peer_device, *peers]
+        return peers
 
     def peer_count(self) -> int:
-        return len(self._peers)
+        return len(self.get_peers(include_self=True))
 
     # Internal ------------------------------------------------------------
     def _ordered_peers(self) -> List[CDevice]:

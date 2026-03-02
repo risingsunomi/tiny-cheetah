@@ -119,7 +119,8 @@ class OrchestrationScreen(Screen[None]):
         )
 
     def _network_map_text(self) -> str:
-        peers = self._peer_client.get_peers(include_self=True)
+        peers = [self._peer_entry_to_obj(peer) for peer in self._peer_client.get_peers(include_self=True)]
+        peers = [peer for peer in peers if peer is not None]
         def _status(peer) -> str:
             available = getattr(peer, "available", None)
             if available is not None:
@@ -169,7 +170,8 @@ class OrchestrationScreen(Screen[None]):
         return "\n".join(ring_lines)
 
     def _peer_summary_text(self) -> str:
-        peers = self._peer_client.get_peers(include_self=False)
+        peers = [self._peer_entry_to_obj(peer) for peer in self._peer_client.get_peers(include_self=False)]
+        peers = [peer for peer in peers if peer is not None]
         if not peers:
             return "\n".join(
                 [
@@ -199,3 +201,9 @@ class OrchestrationScreen(Screen[None]):
 
     def _update_action_variants(self) -> None:
         return
+
+    @staticmethod
+    def _peer_entry_to_obj(peer: object) -> object | None:
+        if isinstance(peer, tuple) and len(peer) == 2:
+            return peer[1]
+        return peer
