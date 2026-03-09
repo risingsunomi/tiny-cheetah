@@ -24,6 +24,7 @@ DEVICE = get_backend_device("tinygrad", default="CPU") or "CPU"
 
 class TestModel(unittest.TestCase):
     def setUp(self):
+        # self.test_model = "unsloth/Llama-3.2-1B-Instruct"
         self.test_model = "Qwen/Qwen2.5-0.5B-Instruct"
         repo = RepoCustom(self.test_model, backend="tinygrad")
 
@@ -95,6 +96,8 @@ class TestModel(unittest.TestCase):
             repetition_penalty=float(self.model_config.get("repetition_penalty") or 1.0),
         )
 
+        print(f"[User]: {user_prompt}")
+        print(f"[Model]: {self.tokenizer.decode(out_tokens, skip_special_tokens=True)}")
         self.assertGreater(len(out_tokens), 0)
 
 
