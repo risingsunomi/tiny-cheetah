@@ -1,12 +1,12 @@
-import os
 import unittest
 import time
 
 import tinygrad as tg
 from transformers import AutoTokenizer
 
+from tiny_cheetah.models.llm.backend import get_backend_device
 from tiny_cheetah.models.llm.tinygrad.model import Model
-from tiny_cheetah.models.llm.tinygrad.helpers import load_safetensors, sample, generate
+from tiny_cheetah.models.llm.tinygrad.helpers import load_safetensors, sample
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.repos import RepoHuggingFace
 
@@ -16,7 +16,7 @@ TOP_P = 0.0
 ALPHA_F = 0.0
 ALPHA_P = 0.0
 
-DEVICE = os.getenv("TC_DEVICE", "CPU")  # or "CUDA"/"CPU"
+DEVICE = get_backend_device("tinygrad", default="CPU") or "CPU"
 
 class TestModel(unittest.TestCase):
     def setUp(self):
@@ -66,9 +66,8 @@ class TestModel(unittest.TestCase):
         # run generation (prints tok/s when EOS or max tokens hit)
         
         # select device
-        if os.getenv("TC_DEVICE") is not None:
-            device = os.getenv("TC_DEVICE")
-        else:
+        configured_device = get_backend_device("tinygrad", default=None)
+        if configured_device is None:
             available_devices = tg.Device.DEFAULT.split(",")    
             if "METAL" in available_devices:
                 device = "METAL"
@@ -79,6 +78,8 @@ class TestModel(unittest.TestCase):
             else:
                 print(f"Using default CPU device")
                 device = "CPU"
+        else:
+            device = configured_device
 
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)

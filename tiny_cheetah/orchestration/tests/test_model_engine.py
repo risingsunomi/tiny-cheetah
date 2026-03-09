@@ -1,12 +1,11 @@
 import asyncio
-import os
 from pathlib import Path
 import unittest
 
 from tiny_cheetah.orchestration.model_engine import ModelEngine
 from tiny_cheetah.orchestration.cdevice import CDevice
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.models.llm.backend import backend_helpers_module, backend_model_class
+from tiny_cheetah.models.llm.backend import backend_helpers_module, backend_model_class, get_backend_device
 from tiny_cheetah.repos import RepoCustom
 
 
@@ -67,7 +66,7 @@ class TestModelEngine(unittest.TestCase):
             model,
             model_path,
             config,
-            weight_device=os.getenv("TC_DEVICE", "CPU"),
+            weight_device=get_backend_device("tinygrad", default="CPU") or "CPU",
             use_tied=config.get("tie_word_embeddings", False),
         )
 

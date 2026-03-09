@@ -12,7 +12,7 @@ except ModuleNotFoundError:
     torch = None
 
 if torch is not None:
-    from tiny_cheetah.models.llm.torch.helpers import load_safetensors
+    from tiny_cheetah.models.llm.torch.helpers import generate, load_safetensors, sample
     from tiny_cheetah.models.llm.torch.helpers import permute as helpers_permute
 
 
@@ -49,6 +49,36 @@ if torch is not None:
         def __init__(self):
             super().__init__()
             self.layers = torch.nn.ModuleList([_DummyLayer()])
+
+
+    class _DummyGenerateModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.position_ids_seen: list[torch.Tensor] = []
+            self.reset_calls = 0
+
+        def reset_kv_cache(self) -> None:
+            self.reset_calls += 1
+
+        def forward(
+            self,
+            x: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
+            position_ids: torch.Tensor | None = None,
+            hidden_state: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del attention_mask, hidden_state
+            if position_ids is None:
+                raise AssertionError("position_ids should be provided")
+            self.position_ids_seen.append(position_ids.detach().cpu().clone())
+            batch_size, seq_len = x.shape
+            logits = torch.zeros((batch_size, seq_len, 4), dtype=torch.float32)
+            logits[..., 1] = 1.0
+            return logits
+
+
+    class _DummyTokenizer:
+        eos_token_id = 3
 
 
 def _write_model_index(model_dir: Path, weight_map: dict[str, str]) -> None:
@@ -104,6 +134,43 @@ class TestHelpersLoader(unittest.TestCase):
 
             expected = torch.from_numpy(raw_weight).to(dtype=model.q_proj.weight.dtype)
             torch.testing.assert_close(model.q_proj.weight.detach().cpu(), expected)
+
+
+@unittest.skipIf(torch is None, "torch is not installed")
+class TestHelpersGenerate(unittest.TestCase):
+    def test_sample_applies_repetition_penalty_before_argmax_shortcut(self):
+        logits = torch.tensor([1.0, 0.9, 0.1], dtype=torch.float32)
+        tok = sample(
+            logits,
+            temp=0.0,
+            k=0,
+            p=1.0,
+            seen_tokens=[0],
+            repetition_penalty=2.0,
+        )
+        self.assertEqual(int(tok.item()), 1)
+
+    def test_generate_uses_absolute_decode_positions_after_prefill(self):
+        model = _DummyGenerateModel()
+        tokenizer = _DummyTokenizer()
+
+        out = generate(
+            model,
+            input_ids=torch.tensor([[10, 11, 12, 13]], dtype=torch.long),
+            attention_mask=torch.ones((1, 4), dtype=torch.long),
+            tokenizer=tokenizer,
+            max_new_tokens=3,
+            temp=0.0,
+            top_k=0,
+            top_p=1.0,
+        )
+
+        self.assertEqual(out, [1, 1, 1])
+        self.assertEqual(model.reset_calls, 1)
+        self.assertEqual(len(model.position_ids_seen), 3)
+        self.assertTrue(torch.equal(model.position_ids_seen[0], torch.tensor([[0, 1, 2, 3]])))
+        self.assertTrue(torch.equal(model.position_ids_seen[1], torch.tensor([4])))
+        self.assertTrue(torch.equal(model.position_ids_seen[2], torch.tensor([5])))
 
     def test_load_safetensors_loads_gpt_oss_moe_expert_tensor(self):
         with tempfile.TemporaryDirectory() as temp_dir:

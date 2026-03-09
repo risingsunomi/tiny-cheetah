@@ -1,5 +1,4 @@
 import asyncio
-import os
 from pathlib import Path
 import unittest
 import time
@@ -7,6 +6,7 @@ import time
 from transformers import AutoTokenizer
 import tinygrad as tg
 
+from tiny_cheetah.models.llm.backend import get_backend_device
 from tiny_cheetah.models.llm.tinygrad.model import Model
 from tiny_cheetah.models.llm.tinygrad.helpers import sample
 from tiny_cheetah.models.llm.tinygrad.quantize import is_quantized_model_config, load_quantized_safetensors
@@ -19,7 +19,7 @@ TOP_P = 0.9
 ALPHA_F = 0.0
 ALPHA_P = 0.0
 
-DEVICE = "CPU"  # or "CUDA"/"CPU"
+DEVICE = get_backend_device("tinygrad", default="CPU") or "CPU"
 
 
 class TestQuantizedLlamaModel(unittest.TestCase):
@@ -82,9 +82,8 @@ class TestQuantizedLlamaModel(unittest.TestCase):
         # run generation (prints tok/s when EOS or max tokens hit)
         
         # select device
-        if os.getenv("TC_DEVICE") is not None:
-            device = os.getenv("TC_DEVICE")
-        else:
+        configured_device = get_backend_device("tinygrad", default=None)
+        if configured_device is None:
             available_devices = tg.Device.DEFAULT.split(",")    
             if "METAL" in available_devices:
                 device = "METAL"
@@ -95,6 +94,8 @@ class TestQuantizedLlamaModel(unittest.TestCase):
             else:
                 print(f"Using default CPU device")
                 device = "CPU"
+        else:
+            device = configured_device
 
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)

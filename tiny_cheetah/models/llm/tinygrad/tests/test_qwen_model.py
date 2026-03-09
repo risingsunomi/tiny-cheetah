@@ -1,11 +1,11 @@
-import os
 import unittest
 
 import transformers as hf_transformers
 import tinygrad as tg
 
+from tiny_cheetah.models.llm.backend import get_backend_device
 from tiny_cheetah.models.llm.tinygrad.model import Model
-from tiny_cheetah.models.llm.tinygrad.helpers import load_safetensors, sample, generate
+from tiny_cheetah.models.llm.tinygrad.helpers import load_safetensors, generate
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.repos import RepoHuggingFace
 
@@ -15,7 +15,7 @@ TOP_P = 0.0
 ALPHA_F = 0.0
 ALPHA_P = 0.0
 
-DEVICE = os.getenv("TC_DEVICE", "CPU")  # or "CUDA"/"CPU"
+DEVICE = get_backend_device("tinygrad", default="CPU") or "CPU"
 
 class TestModel(unittest.TestCase):
     def setUp(self):

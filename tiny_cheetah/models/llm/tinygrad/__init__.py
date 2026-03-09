@@ -4,6 +4,7 @@ from .kv_cache import KVCache
 from .mlp import MLP
 from .model import Model
 from .model_config import ModelConfig
+from .moe import MOEExperts, MOEMLP, MOERouter
 from .quantize import (
     _dequantize_bnb_nf4,
     _dequantize_bnb_nf4_simple,
@@ -16,6 +17,9 @@ from .transformer import TransformerBlock
 __all__ = [
     "KVCache",
     "MLP",
+    "MOEExperts",
+    "MOEMLP",
+    "MOERouter",
     "Model",
     "ModelConfig",
     "MultiHeadAttention",

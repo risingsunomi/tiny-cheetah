@@ -33,7 +33,7 @@ class ModelPickerScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Container(id="model-picker-container"):
             yield Static("Select Model", id="model-picker-title")
-            yield Label("Enter a Hugging Face repo or choose a cached model:", id="model-picker-help")
+            yield Label("Enter a HuggingFace repo name or choose a cached model:", id="model-picker-help")
             if self._cache_options:
                 with Container(id="model-picker-cache"):
                     yield Label("Cached Models", id="model-picker-cache-title")

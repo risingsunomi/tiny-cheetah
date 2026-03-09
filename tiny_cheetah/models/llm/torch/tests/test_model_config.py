@@ -14,6 +14,37 @@ if torch is not None:
 
 @unittest.skipIf(torch is None, "torch is not installed")
 class TestModelConfig(unittest.TestCase):
+    def test_load_qwen2_defaults_match_transformers_bias_and_qk_norm_behavior(self):
+        payload = {
+            "model_type": "qwen2",
+            "architectures": ["Qwen2ForCausalLM"],
+            "hidden_size": 3584,
+            "num_attention_heads": 28,
+            "num_key_value_heads": 4,
+            "max_position_embeddings": 32768,
+            "intermediate_size": 18944,
+            "num_hidden_layers": 28,
+            "vocab_size": 152064,
+            "hidden_act": "silu",
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 1000000.0,
+            "tie_word_embeddings": False,
+            "torch_dtype": "bfloat16",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.json"
+            cfg.write_text(json.dumps(payload), encoding="utf-8")
+            model_config = ModelConfig()
+            model_config.load(cfg)
+
+        c = model_config.config
+        self.assertEqual(c["model_type"], "qwen2")
+        self.assertFalse(c["qk_norm"])
+        self.assertTrue(c["qkv_bias"])
+        self.assertFalse(c["o_proj_bias"])
+        self.assertFalse(c["tie_word_embeddings"])
+
     def test_load_gpt_oss_moe_fields(self):
         payload = {
             "model_type": "gpt_oss",
@@ -90,7 +121,38 @@ class TestModelConfig(unittest.TestCase):
         self.assertIsNone(c["temperature"])
         self.assertIsNone(c["top_k"])
         self.assertIsNone(c["top_p"])
+        self.assertIsNone(c["repetition_penalty"])
         self.assertEqual(c["eos_token_id"], [200002, 199999, 200012])
+
+    def test_load_generation_config_reads_repetition_penalty(self):
+        payload = {
+            "model_type": "qwen2",
+            "hidden_size": 128,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "max_position_embeddings": 64,
+            "intermediate_size": 256,
+            "num_hidden_layers": 2,
+            "vocab_size": 1024,
+        }
+        gen_payload = {
+            "temperature": 0.7,
+            "top_k": 20,
+            "top_p": 0.8,
+            "repetition_penalty": 1.05,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.json"
+            gen_cfg = Path(tmp) / "generation_config.json"
+            cfg.write_text(json.dumps(payload), encoding="utf-8")
+            gen_cfg.write_text(json.dumps(gen_payload), encoding="utf-8")
+
+            model_config = ModelConfig()
+            model_config.load(cfg)
+            model_config.load_generation_config(gen_cfg)
+
+        self.assertEqual(model_config.config["repetition_penalty"], 1.05)
 
 
 if __name__ == "__main__":

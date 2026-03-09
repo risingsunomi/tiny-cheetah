@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 import torch
 from torch import nn
 
+from tiny_cheetah.models.llm.backend import get_backend_device
 from ...shard import Shard
 from .transformer import TransformerBlock
 
@@ -48,7 +48,8 @@ class Model(nn.Module):
         super().__init__()
         self.config = config
         self.shard = shard
-        self.device_name = os.getenv("TC_DEVICE", "cpu")
+        self.device_name = get_backend_device("torch", default="cpu")
+        assert self.device_name is not None
         self.inference_dtype = _resolve_model_dtype(self.config, self.device_name)
 
         print(f"loading shard: {shard}")

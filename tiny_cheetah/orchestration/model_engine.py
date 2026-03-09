@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import base64
-import os
 import struct
 from typing import Any, Dict, List, Sequence
 
@@ -13,7 +12,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     torch = None  # type: ignore[assignment]
 
-from tiny_cheetah.models.llm.backend import backend_helpers_module
+from tiny_cheetah.models.llm.backend import backend_helpers_module, get_backend_device
 from tiny_cheetah.models.shard import Shard
 
 
@@ -38,6 +37,8 @@ class ModelEngine:
         top_p: float = 0.8,
         alpha_f: float = 0.0,
         alpha_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        seen_tokens: Sequence[int] | None = None,
     ) -> Dict[str, Any]:
         """Generate the next token and return a JSON-serializable payload."""
         curr_pos = int(attention_mask.shape[1] - 1)
@@ -68,7 +69,16 @@ class ModelEngine:
             }
 
         next_logit = model_output[:, -1, :].flatten()
-        tok = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+        tok = _sample_with_backend(
+            next_logit,
+            temp=temp,
+            k=top_k,
+            p=top_p,
+            af=alpha_f,
+            ap=alpha_p,
+            repetition_penalty=repetition_penalty,
+            seen_tokens=list(seen_tokens or []),
+        ).item()
         tok = int(tok)
         end_token = bool(getattr(tokenizer, "eos_token_id", None) == tok)
 
@@ -298,7 +308,7 @@ def _position_ids_tensor(position: int, like: Any) -> Any:
 
 
 def _torch_target_device() -> str:
-    configured = str(os.getenv("TC_DEVICE", "cpu")).strip().lower()
+    configured = str(get_backend_device("torch", default="cpu") or "cpu").strip().lower()
     if configured in {"metal", "mps"}:
         return "mps"
     if configured.startswith("cuda"):

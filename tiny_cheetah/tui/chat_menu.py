@@ -7,7 +7,7 @@ from datetime import datetime
 import os
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import traceback
 
 from transformers import AutoTokenizer
@@ -15,6 +15,7 @@ from rich.markup import escape
 
 from tiny_cheetah.models.llm.backend import (
     detect_quantization_mode,
+    get_backend_device,
     get_llm_backend,
     load_model_for_backend,
 )
@@ -213,6 +214,7 @@ class ChatScreen(Screen[None]):
             temperature=effective["temperature"],
             top_k=int(effective["top_k"]),
             top_p=effective["top_p"],
+            repetition_penalty=effective["repetition_penalty"],
             alpha_f=effective["alpha_f"],
             alpha_p=effective["alpha_p"],
         )
@@ -227,6 +229,7 @@ class ChatScreen(Screen[None]):
             f"temp={self._gen_overrides.get('temperature')}, "
             f"top_k={self._gen_overrides.get('top_k')}, "
             f"top_p={self._gen_overrides.get('top_p')}, "
+            f"repetition_penalty={self._gen_overrides.get('repetition_penalty')}, "
             f"alpha_f={self._gen_overrides.get('alpha_f')}, "
             f"alpha_p={self._gen_overrides.get('alpha_p')}",
             persist=False,
@@ -255,6 +258,10 @@ class ChatScreen(Screen[None]):
             "temperature": _as_float(self._gen_overrides.get("temperature", config.get("temperature")), 1.0),
             "top_k": _as_int(self._gen_overrides.get("top_k", config.get("top_k")), 0),
             "top_p": _as_float(self._gen_overrides.get("top_p", config.get("top_p")), 0.8),
+            "repetition_penalty": _as_float(
+                self._gen_overrides.get("repetition_penalty", config.get("repetition_penalty")),
+                1.0,
+            ),
             "alpha_f": _as_float(self._gen_overrides.get("alpha_f", 0.0), 0.0),
             "alpha_p": _as_float(self._gen_overrides.get("alpha_p", 0.0), 0.0),
         }
@@ -709,6 +716,8 @@ class ChatScreen(Screen[None]):
                 top_p=float(payload.get("top_p", 0.8) or 0.8),
                 alpha_f=float(payload.get("alpha_f", 0.0) or 0.0),
                 alpha_p=float(payload.get("alpha_p", 0.0) or 0.0),
+                repetition_penalty=float(payload.get("repetition_penalty", 1.0) or 1.0),
+                seen_tokens=[int(tok) for tok in payload.get("seen_tokens", []) or []],
             )
         except Exception as exc:
             logger.exception("Peer token generation failed: %s", exc)
@@ -737,7 +746,8 @@ class ChatScreen(Screen[None]):
         import tinygrad as tg
 
         dtype = tg.dtypes.int32 if integer else None
-        device = os.getenv("TC_DEVICE", "CPU")
+        device = get_backend_device("tinygrad", default="CPU")
+        assert device is not None
         tensor = tg.Tensor(data, device=device)
         if dtype is not None:
             tensor = tensor.cast(dtype)
@@ -745,7 +755,7 @@ class ChatScreen(Screen[None]):
 
     @staticmethod
     def _torch_runtime_device() -> str:
-        device = str(os.getenv("TC_DEVICE", "cpu")).strip().lower()
+        device = str(get_backend_device("torch", default="cpu") or "cpu").strip().lower()
         if device in {"metal", "mps"}:
             return "mps"
         if device.startswith("cuda"):
@@ -1060,9 +1070,9 @@ class ChatScreen(Screen[None]):
 
     def _log_sys_msg(self, message: str, *, persist: bool = False) -> None:
         self._append_system(message, persist=persist)
-    
-    async def _log_sys_msg_async(self, message: str) -> Awaitable[None]:
-        await asyncio.to_thread(self._append_system, message, persist=False)
+
+    async def _log_model_download_progress(self, message: str) -> None:
+        self._log_sys_msg(f"[download] {message}", persist=False)
 
     async def _load_model(self) -> tuple[Any, object, AutoTokenizer, Path, float]:
         try:
@@ -1074,6 +1084,7 @@ class ChatScreen(Screen[None]):
                 weight_device=None,
                 offline_mode=self._offline,
                 backend=self._llm_backend,
+                progress_callback=self._log_model_download_progress,
             )
             elapsed = time.time() - start
             return model, model_config, tokenizer, model_path, elapsed
@@ -1118,6 +1129,7 @@ class ChatScreen(Screen[None]):
         temp = float(gen_cfg["temperature"])
         top_k = int(gen_cfg["top_k"])
         top_p = float(gen_cfg["top_p"])
+        repetition_penalty = float(gen_cfg["repetition_penalty"])
         alpha_f = float(gen_cfg["alpha_f"])
         alpha_p = float(gen_cfg["alpha_p"])
 
@@ -1129,12 +1141,13 @@ class ChatScreen(Screen[None]):
                 input_ids,
                 attention_mask,
                 self._tokenizer,
-                max_new,
-                temp,
-                top_k,
-                top_p,
-                alpha_f,
-                alpha_p,
+                max_new_tokens=max_new,
+                temp=temp,
+                top_k=top_k,
+                top_p=top_p,
+                alpha_f=alpha_f,
+                alpha_p=alpha_p,
+                repetition_penalty=repetition_penalty,
                 on_token=on_token,
                 abort_check=self._memory_abort_reason,
             )
@@ -1165,6 +1178,7 @@ class ChatScreen(Screen[None]):
         temp = float(gen_cfg["temperature"])
         top_k = int(gen_cfg["top_k"])
         top_p = float(gen_cfg["top_p"])
+        repetition_penalty = float(gen_cfg["repetition_penalty"])
         alpha_f = float(gen_cfg["alpha_f"])
         alpha_p = float(gen_cfg["alpha_p"])
 
@@ -1176,12 +1190,13 @@ class ChatScreen(Screen[None]):
                 input_ids,
                 attention_mask,
                 self._tokenizer,
-                max_new,
-                temp,
-                top_k,
-                top_p,
-                alpha_f,
-                alpha_p,
+                max_new_tokens=max_new,
+                temp=temp,
+                top_k=top_k,
+                top_p=top_p,
+                alpha_f=alpha_f,
+                alpha_p=alpha_p,
+                repetition_penalty=repetition_penalty,
                 on_token=on_token,
                 abort_check=self._memory_abort_reason,
             )
@@ -1271,6 +1286,7 @@ class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
         temperature: float,
         top_k: int,
         top_p: float,
+        repetition_penalty: float,
         alpha_f: float,
         alpha_p: float,
     ) -> None:
@@ -1279,6 +1295,7 @@ class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
             "temperature": temperature,
             "top_k": top_k,
             "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
             "alpha_f": alpha_f,
             "alpha_p": alpha_p,
         }
@@ -1302,6 +1319,14 @@ class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
             top_p_input = Input(id="chat-gen-config-top-p", placeholder="e.g. 0.9")
             self._inputs["top_p"] = top_p_input
             yield top_p_input
+
+            yield Label("repetition_penalty", classes="chat-gen-config-label")
+            repetition_penalty_input = Input(
+                id="chat-gen-config-repetition-penalty",
+                placeholder="e.g. 1.05",
+            )
+            self._inputs["repetition_penalty"] = repetition_penalty_input
+            yield repetition_penalty_input
 
             yield Label("alpha_f", classes="chat-gen-config-label")
             alpha_f_input = Input(id="chat-gen-config-alpha-f", placeholder="e.g. 0.0")
@@ -1336,6 +1361,7 @@ class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
             temperature = float(self._inputs["temperature"].value.strip())
             top_k = int(self._inputs["top_k"].value.strip())
             top_p = float(self._inputs["top_p"].value.strip())
+            repetition_penalty = float(self._inputs["repetition_penalty"].value.strip())
             alpha_f = float(self._inputs["alpha_f"].value.strip())
             alpha_p = float(self._inputs["alpha_p"].value.strip())
         except ValueError:
@@ -1351,6 +1377,9 @@ class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
         if not (0.0 <= top_p <= 1.0):
             self._set_status("top_p must be between 0 and 1.")
             return
+        if repetition_penalty <= 0.0:
+            self._set_status("repetition_penalty must be > 0.")
+            return
         if alpha_f < 0 or alpha_p < 0:
             self._set_status("alpha_f and alpha_p must be >= 0.")
             return
@@ -1360,6 +1389,7 @@ class GenerationConfigModal(ModalScreen[Optional[dict[str, float | int]]]):
                 "temperature": temperature,
                 "top_k": top_k,
                 "top_p": top_p,
+                "repetition_penalty": repetition_penalty,
                 "alpha_f": alpha_f,
                 "alpha_p": alpha_p,
             }

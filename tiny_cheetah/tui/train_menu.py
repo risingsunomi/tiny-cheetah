@@ -18,6 +18,7 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
 from tiny_cheetah.orchestration.peer_client import PeerClient
+from tiny_cheetah.models.llm.backend import get_backend_device, get_llm_backend
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
 from tiny_cheetah.tui.help_screen import HelpScreen
 from rich.markup import escape
@@ -65,7 +66,12 @@ SETTINGS_FIELDS: List[Dict[str, object]] = [
     {"name": "batch-size", "label": "Batch Size", "placeholder": "Default 2", "default": "2"},
     {"name": "epochs", "label": "Epochs", "placeholder": "Default 1", "default": "1"},
     {"name": "lr", "label": "Learning Rate", "placeholder": "Default 1e-4", "default": "1e-4"},
-    {"name": "device", "label": "Device", "placeholder": "Default CPU", "default": os.environ.get("TC_DEVICE", "CPU")},
+    {
+        "name": "device",
+        "label": "Device",
+        "placeholder": "Default CPU",
+        "default": get_backend_device(get_llm_backend(), default="CPU") or "CPU",
+    },
     {"name": "gradient-accumulation", "label": "Grad Accum", "placeholder": "Default 1", "default": "1"},
     {"name": "save-dir", "label": "Save Dir", "placeholder": "Checkpoint output", "default": ""},
     {"name": "offline", "label": "Offline Mode", "type": "checkbox", "default": False},

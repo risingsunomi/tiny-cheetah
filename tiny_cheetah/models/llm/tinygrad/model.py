@@ -23,13 +23,17 @@ class Model:
 
         self.norm = tg.nn.LayerNorm(self.config["embed_dim"], eps=self.config["norm_eps"])
 
-        self.layers = [None for _ in range(self.shard.start_layer, self.shard.end_layer)]
-
-        for i in range(self.shard.start_layer, self.shard.end_layer):
-            self.layers[i] = TransformerBlock(self.config)
+        self.layers = [
+            TransformerBlock(self.config, layer_idx=layer_idx)
+            for layer_idx in range(self.shard.start_layer, self.shard.end_layer)
+        ]
 
         # output == lm_head
-        self.output = tg.nn.Linear(self.config["embed_dim"], self.config["vocab_size"])
+        self.output = tg.nn.Linear(
+            self.config["embed_dim"],
+            self.config["vocab_size"],
+            bias=bool(self.config.get("lm_head_bias", False)),
+        )
         if use_tied:
             self.output.weight = self.embed_tokens.weight
 
@@ -53,8 +57,8 @@ class Model:
         else:
             x = hidden_state
             
-        for i in range(self.shard.start_layer, self.shard.end_layer):
-            x = self.layers[i](x, attention_mask, position_ids)
+        for layer in self.layers:
+            x = layer(x, attention_mask, position_ids)
 
         if self.shard.end_layer == self.shard.total_layers-1:
             x = self.norm(x)

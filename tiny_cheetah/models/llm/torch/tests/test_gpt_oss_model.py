@@ -25,7 +25,8 @@ ALPHA_F = 0.0
 ALPHA_P = 0.0
 MAX_NEW_TOKENS = 128
 
-DEVICE = os.getenv("TC_DEVICE", "mps" if torch and torch.backends.mps.is_available() else "cpu")
+DEVICE = "mps"
+# DEVICE = "cpu"
 
 HARMONY_FINAL_MARKER = "<|channel|>final<|message|>"
 HARMONY_STOP_MARKERS = ("<|end|>", "<|return|>", "<|call|>", "<|channel|>")

@@ -12,8 +12,12 @@ from textual.widgets import Button, Checkbox, Footer, Header, Label, Static
 from tiny_cheetah.tui.help_screen import HelpScreen
 from tiny_cheetah.models.llm.backend import (
     LLM_BACKEND_ENV,
+    backend_device_env,
+    get_backend_device,
     get_llm_backend,
+    normalize_backend_device,
     normalize_llm_backend,
+    set_backend_device,
     set_llm_backend,
 )
 from tiny_cheetah.orchestration.device_info import collect_host_info
@@ -41,7 +45,7 @@ class SettingsScreen(Screen[None]):
         with Container(id="settings-root"):
             yield Label("Runtime Settings", id="settings-title")
             yield Static(
-                "Configure compute device (TC_DEVICE) and model backend (TC_LLM_BACKEND).",
+                "Configure model backend and its device env.",
                 id="settings-help",
             )
             with VerticalScroll(id="settings-scroll"):
@@ -94,7 +98,7 @@ class SettingsScreen(Screen[None]):
         devices: List[Dict[str, object]] = host_info.get("devices", []) or []
         backend = self._selected_backend()
         env_target = self._normalize_device_for_backend(
-            (os.getenv("TC_DEVICE") or "").split(",")[0].strip(),
+            (get_backend_device(backend, default="") or "").split(",")[0].strip(),
             backend,
         )
         selected_any = False
@@ -114,11 +118,14 @@ class SettingsScreen(Screen[None]):
             self._device_checks.append((checkbox, compute))
             container.mount(checkbox)
         if env_target:
+            active_env = backend_device_env(backend)
             if selected_any:
-                self._set_status(f"Loaded {LLM_BACKEND_ENV}={backend}, TC_DEVICE={env_target}")
+                self._set_status(
+                    f"Loaded {LLM_BACKEND_ENV}={backend}, {active_env}={env_target}, "
+                )
             else:
                 self._set_status(
-                    f"TC_DEVICE={env_target} not found for backend '{backend}'; please select a device."
+                    f"{active_env}={env_target} not found for backend '{backend}'; please select a device."
                 )
 
     def _load_backends(self) -> None:
@@ -130,6 +137,8 @@ class SettingsScreen(Screen[None]):
         self._backend_checks = []
 
         selected_backend = get_llm_backend()
+        active_env = backend_device_env(selected_backend)
+        active_device = get_backend_device(selected_backend, default="") or "(unset)"
         for backend in ("tinygrad", "torch"):
             checkbox = Checkbox(backend, id=f"backend-{backend}")
             checkbox.value = backend == selected_backend
@@ -137,8 +146,7 @@ class SettingsScreen(Screen[None]):
             container.mount(checkbox)
 
         self._set_status(
-            f"Loaded TC_DEVICE={(os.getenv('TC_DEVICE') or '(unset)').strip() or '(unset)'}, "
-            f"{LLM_BACKEND_ENV}={selected_backend}"
+            f"Loaded {LLM_BACKEND_ENV}={selected_backend}, {active_env}={active_device}, "
         )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
@@ -157,7 +165,9 @@ class SettingsScreen(Screen[None]):
             self._enforce_single_selection(self._backend_checks, event.checkbox)
             for cb, backend in self._backend_checks:
                 if cb is event.checkbox and cb.value:
-                    self._set_status(f"Selected backend {backend}")
+                    active_env = backend_device_env(backend)
+                    active_device = get_backend_device(backend, default="") or "(unset)"
+                    self._set_status(f"Selected backend {backend} ({active_env}={active_device})")
                     # Device identifiers differ by backend (e.g. tinygrad METAL vs torch mps),
                     # and we refresh after this event cycle to avoid mount/remove races.
                     self.call_after_refresh(self._load_devices)
@@ -179,11 +189,14 @@ class SettingsScreen(Screen[None]):
             self._set_status("Select exactly one backend.")
             return
 
-        os.environ["TC_DEVICE"] = chosen_device
-        backend = set_llm_backend(chosen_backend)
+        backend = normalize_llm_backend(chosen_backend)
+        device_env = backend_device_env(backend)
+        selected_device = set_backend_device(chosen_device, backend=backend)
+        backend = set_llm_backend(backend)
+        active_device = get_backend_device(backend, default=selected_device) or selected_device
 
         try:
-            self._persist_env_setting("TC_DEVICE", chosen_device)
+            self._persist_env_setting(device_env, selected_device)
             self._persist_env_setting(LLM_BACKEND_ENV, backend)
         except Exception as exc:
             self._set_status(
@@ -192,7 +205,7 @@ class SettingsScreen(Screen[None]):
             return
 
         self._set_status(
-            f"Saved TC_DEVICE={os.environ['TC_DEVICE']} and {LLM_BACKEND_ENV}={normalize_llm_backend(backend)}"
+            f"Saved {device_env}={selected_device}, {LLM_BACKEND_ENV}={backend}"
         )
 
     @staticmethod
@@ -201,7 +214,7 @@ class SettingsScreen(Screen[None]):
             [
                 "Settings Screen",
                 "- Select one device target and one backend.",
-                "- Save writes TC_DEVICE and TC_LLM_BACKEND to environment/.env.",
+                "- Save writes TC_TINYGRAD_DEVICE or TC_TORCH_DEVICE for the selected backend.",
                 "- h opens this help screen.",
                 "- b / Esc returns to the previous screen.",
             ]
@@ -213,9 +226,9 @@ class SettingsScreen(Screen[None]):
 
     @staticmethod
     def _normalize_device_for_backend(value: str, backend: str) -> str:
-        if backend == "torch":
-            return value.strip().lower()
-        return value.strip().upper()
+        if not value.strip():
+            return ""
+        return normalize_backend_device(value, backend)
 
     def _device_value_for_backend(self, device: Dict[str, object], backend: str) -> str:
         kind = str(device.get("kind", "device")).upper()

@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 class ModelConfig:
     def __init__(self):
         self.config: dict = {}
-        self.qk_norm_models = ["qwen3", "qwen2"]
+        self.qk_norm_models = ["qwen3", "qwen3_moe"]
 
     def load(self, config_file: Path) -> None:
         with open(config_file, "r") as handle:
@@ -32,6 +32,15 @@ class ModelConfig:
             "uint8": torch.uint8,
             "bool": torch.bool,
         }
+
+        model_type = str(base_config.get("model_type", "")).lower()
+        default_attn_bias = base_config.get("attention_bias", base_config.get("attn_bias", False))
+        qkv_bias = bool(base_config.get("qkv_bias", default_attn_bias))
+        o_proj_bias = bool(base_config.get("o_proj_bias", base_config.get("attention_output_bias", qkv_bias)))
+
+        if model_type in {"qwen2", "qwen2_moe", "qwen3", "qwen3_moe"}:
+            qkv_bias = True
+            o_proj_bias = False
 
         self.config = {
             "architectures": base_config.get("architectures", []),
@@ -52,7 +61,9 @@ class ModelConfig:
             "sliding_window": int(base_config.get("sliding_window", 0) or 0),
             "vocab_size": base_config.get("vocab_size", 0),
             "num_layers": base_config.get("num_hidden_layers", 0),
-            "attn_bias": base_config.get("attention_bias", base_config.get("attn_bias", False)),
+            "attn_bias": qkv_bias,
+            "qkv_bias": qkv_bias,
+            "o_proj_bias": o_proj_bias,
             "mlp_bias": base_config.get("mlp_bias", False),
             "lm_head_bias": base_config.get("lm_head_bias", base_config.get("output_bias", False)),
             "hidden_act": base_config.get("hidden_act", "silu"),
@@ -62,7 +73,7 @@ class ModelConfig:
                 torch.bfloat16,
             ),
             "tie_word_embeddings": base_config.get("tie_word_embeddings", False),
-            "model_type": base_config.get("model_type", ""),
+            "model_type": model_type,
             "num_local_experts": int(base_config.get("num_local_experts", base_config.get("num_experts", 0)) or 0),
             "experts_per_token": int(
                 base_config.get("experts_per_token", base_config.get("num_experts_per_tok", 0)) or 0
@@ -80,6 +91,7 @@ class ModelConfig:
             "temperature": None,
             "top_k": None,
             "top_p": None,
+            "repetition_penalty": None,
             "eos_token_id": base_config.get("eos_token_id"),
             "pad_token_id": base_config.get("pad_token_id"),
             "bos_token_id": base_config.get("bos_token_id"),
@@ -109,7 +121,7 @@ class ModelConfig:
             self.config["qk_norm"] = attn_qk_norm
         elif isinstance(attn_qk_norm, str):
             self.config["qk_norm"] = len(attn_qk_norm) > 0
-        elif self.config.get("model_type", "") in self.qk_norm_models:
+        elif any(self.config.get("model_type", "").startswith(prefix) for prefix in self.qk_norm_models):
             self.config["qk_norm"] = True
         else:
             self.config["qk_norm"] = False
@@ -117,6 +129,8 @@ class ModelConfig:
         if self.config.get("model_type") == "gpt_oss":
             # GPT-OSS exposes separate attention and expert bias tensors.
             self.config["attn_bias"] = True
+            self.config["qkv_bias"] = True
+            self.config["o_proj_bias"] = True
             self.config["mlp_bias"] = True
 
         self.config["moe"] = bool(
@@ -151,6 +165,14 @@ class ModelConfig:
         elif "top_p" in gen_config:
             top_p = gen_config["top_p"]
             self.config["top_p"] = None if top_p is None else float(top_p)
+
+        if os.getenv("TC_REPETITION_PENALTY") is not None:
+            self.config["repetition_penalty"] = float(os.getenv("TC_REPETITION_PENALTY"))
+        elif "repetition_penalty" in gen_config:
+            repetition_penalty = gen_config["repetition_penalty"]
+            self.config["repetition_penalty"] = (
+                None if repetition_penalty is None else float(repetition_penalty)
+            )
 
         self.config["eos_token_id"] = gen_config.get("eos_token_id")
         self.config["pad_token_id"] = gen_config.get("pad_token_id")

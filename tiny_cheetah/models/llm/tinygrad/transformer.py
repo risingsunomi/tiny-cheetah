@@ -2,19 +2,24 @@ import tinygrad as tg
 
 from .attention import MultiHeadAttention
 from .mlp import MLP
+from .moe import MOEMLP
 
 class TransformerBlock:
     def __init__(
         self,
-        config: dict
+        config: dict,
+        layer_idx: int | None = None,
     ):
         self.input_layernorm = tg.nn.RMSNorm(config["embed_dim"])
-        self.mlp = MLP(
-            config.get("embed_dim"),
-            config.get("intermediate_dim"),
-            config.get("hidden_act"),
-            config.get("mlp_bias", True),
-        )
+        if bool(config.get("moe")):
+            self.mlp = MOEMLP(config)
+        else:
+            self.mlp = MLP(
+                config.get("embed_dim"),
+                config.get("intermediate_dim"),
+                config.get("hidden_act"),
+                config.get("mlp_bias", True),
+            )
         self.self_attn = MultiHeadAttention(
             config=config,
             is_causal=any("CausalLM" in arch for arch in config.get("architectures", []))

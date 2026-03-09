@@ -19,6 +19,8 @@ class TestMultiHeadAttention(unittest.TestCase):
             "head_dim": 8,
             "max_seq_len": 16,
             "attn_bias": False,
+            "qkv_bias": False,
+            "o_proj_bias": False,
             "attn_dropout": 0.0,
             "rope_scaling": None,
             "rope_theta": 10000.0,
@@ -50,6 +52,45 @@ class TestMultiHeadAttention(unittest.TestCase):
 
         decode_out = mha(x_step, attention_mask=mask_step, position_ids=pos_step)
         self.assertEqual(tuple(decode_out.shape), (2, 1, self.config["embed_dim"]))
+
+    def test_qwen_style_bias_flags_create_qkv_bias_without_output_bias(self):
+        config = dict(self.config)
+        config["qkv_bias"] = True
+        config["o_proj_bias"] = False
+        mha = MultiHeadAttention(config=config)
+
+        self.assertIsNotNone(mha.q_proj.bias)
+        self.assertIsNotNone(mha.k_proj.bias)
+        self.assertIsNotNone(mha.v_proj.bias)
+        self.assertIsNone(mha.o_proj.bias)
+
+    def test_padding_mask_does_not_disable_causal_prefill(self):
+        config = dict(self.config)
+        config.update(
+            {
+                "embed_dim": 2,
+                "num_heads": 1,
+                "num_kv_heads": 1,
+                "head_dim": 2,
+                "qkv_bias": False,
+                "o_proj_bias": False,
+            }
+        )
+        mha = MultiHeadAttention(config=config, is_causal=True)
+
+        with torch.no_grad():
+            mha.q_proj.weight.zero_()
+            mha.k_proj.weight.zero_()
+            mha.v_proj.weight.copy_(torch.eye(2))
+            mha.o_proj.weight.copy_(torch.eye(2))
+
+        x = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [0.0, 2.0]]])
+        mask = torch.ones((1, 3), dtype=torch.long)
+        pos = torch.zeros((1, 3), dtype=torch.long)
+
+        out = mha(x, attention_mask=mask, position_ids=pos)
+
+        torch.testing.assert_close(out[0, 0], x[0, 0], atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

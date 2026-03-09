@@ -30,32 +30,53 @@ def _rms_norm(dim: int, eps: float = 1e-6) -> nn.Module:
 def _prepare_attention_mask(
     attention_mask: Optional[torch.Tensor],
     query: torch.Tensor,
+    *,
+    key_len: int,
+    is_causal: bool,
 ) -> Optional[torch.Tensor]:
-    if attention_mask is None:
+    if attention_mask is None and not is_causal:
         return None
 
-    mask = attention_mask.to(device=query.device)
+    bool_mask: Optional[torch.Tensor] = None
+    additive_mask: Optional[torch.Tensor] = None
 
-    if mask.ndim == 1:
-        mask = mask.unsqueeze(0)
+    if attention_mask is not None:
+        mask = attention_mask.to(device=query.device)
 
-    if mask.ndim == 2:
-        mask = mask[:, None, None, :]
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0)
 
-    if mask.ndim == 3:
-        mask = mask[:, None, :, :]
+        if mask.ndim == 2:
+            mask = mask[:, None, None, :key_len]
+        elif mask.ndim == 3:
+            mask = mask[:, None, :, :key_len]
+        else:
+            mask = mask[..., :key_len]
 
-    if mask.dtype == torch.bool:
+        if mask.dtype == torch.bool:
+            bool_mask = mask
+        elif mask.dtype.is_floating_point:
+            additive_mask = mask.to(dtype=query.dtype)
+        else:
+            bool_mask = mask > 0
+
+    if is_causal:
+        query_len = query.shape[-2]
+        offset = max(key_len - query_len, 0)
+        query_idx = torch.arange(offset, offset + query_len, device=query.device)[:, None]
+        key_idx = torch.arange(key_len, device=query.device)[None, :]
+        causal_mask = (key_idx <= query_idx).view(1, 1, query_len, key_len)
+        bool_mask = causal_mask if bool_mask is None else (bool_mask & causal_mask)
+
+    if bool_mask is not None:
         zero = torch.zeros((), dtype=query.dtype, device=query.device)
         neg_inf = torch.full((), torch.finfo(query.dtype).min, dtype=query.dtype, device=query.device)
-        return torch.where(mask, zero, neg_inf)
+        bool_mask = torch.where(bool_mask, zero, neg_inf)
+        additive_mask = bool_mask if additive_mask is None else (additive_mask + bool_mask)
 
-    if mask.dtype.is_floating_point:
-        return mask.to(dtype=query.dtype)
-
-    zero = torch.zeros((), dtype=query.dtype, device=query.device)
-    neg_inf = torch.full((), torch.finfo(query.dtype).min, dtype=query.dtype, device=query.device)
-    return torch.where(mask > 0, zero, neg_inf)
+    if additive_mask is None:
+        return None
+    return additive_mask.to(dtype=query.dtype)
 
 
 class MultiHeadAttention(nn.Module):
@@ -75,7 +96,8 @@ class MultiHeadAttention(nn.Module):
         self.max_seq_len = config["max_seq_len"]
         self.kv_cache: KVCache | None = None
 
-        self.attn_bias = config["attn_bias"]
+        self.qkv_bias = bool(config.get("qkv_bias", config.get("attn_bias", False)))
+        self.o_proj_bias = bool(config.get("o_proj_bias", config.get("attn_bias", False)))
         self.attn_dropout = config["attn_dropout"]
         self.is_causal = bool(is_causal)
         self.model_type = str(config.get("model_type", "")).lower()
@@ -122,22 +144,22 @@ class MultiHeadAttention(nn.Module):
         self.q_proj = nn.Linear(
             self.embed_dim,
             self.num_heads * self.head_dim,
-            bias=self.attn_bias,
+            bias=self.qkv_bias,
         )
         self.k_proj = nn.Linear(
             self.embed_dim,
             self.num_kv_heads * self.head_dim,
-            bias=self.attn_bias,
+            bias=self.qkv_bias,
         )
         self.v_proj = nn.Linear(
             self.embed_dim,
             self.num_kv_heads * self.head_dim,
-            bias=self.attn_bias,
+            bias=self.qkv_bias,
         )
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim,
             self.embed_dim,
-            bias=self.attn_bias,
+            bias=self.o_proj_bias,
         )
         if self.use_attention_sinks:
             self.sinks = nn.Parameter(torch.zeros(self.num_heads))
@@ -242,7 +264,12 @@ class MultiHeadAttention(nn.Module):
             scores = probs[..., :-1]
             attn_out = torch.matmul(scores, v)
         else:
-            attn_mask = _prepare_attention_mask(attention_mask, q)
+            attn_mask = _prepare_attention_mask(
+                attention_mask,
+                q,
+                key_len=k.shape[-2],
+                is_causal=self.is_causal,
+            )
             use_causal = self.is_causal if attn_mask is None else False
 
             dropout_p = self.attn_dropout if self.training else 0.0

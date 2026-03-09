@@ -4,14 +4,16 @@ Helpers for LLM models.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Awaitable, Callable, Dict, Optional, Any
 import json
 import os, time
+import numpy as np
 
 import safetensors
 import tinygrad as tg
 from transformers import AutoTokenizer
 
+from tiny_cheetah.models.llm.backend import get_backend_device
 from .model import Model
 from .model_config import ModelConfig
 from .quantize import is_quantized_model_config, load_quantized_safetensors
@@ -143,6 +145,29 @@ def load_safetensors(
 LLM sampling
 """
 
+
+def _apply_repetition_penalty(
+    logits: tg.Tensor,
+    seen_tokens: list[int] | tuple[int, ...] | None,
+    repetition_penalty: float,
+) -> tg.Tensor:
+    if repetition_penalty <= 0.0 or abs(repetition_penalty - 1.0) < 1e-6 or not seen_tokens:
+        return logits
+
+    seen = np.unique(np.asarray(seen_tokens, dtype=np.int64))
+    seen = seen[(seen >= 0) & (seen < logits.numel())]
+    if seen.size == 0:
+        return logits
+
+    logits_np = logits.numpy().astype(np.float32, copy=True)
+    penalized = logits_np[seen]
+    logits_np[seen] = np.where(
+        penalized < 0,
+        penalized * float(repetition_penalty),
+        penalized / float(repetition_penalty),
+    )
+    return tg.Tensor(logits_np, device=logits.device, dtype=logits.dtype)
+
 # From https://github.com/tinygrad/tinygrad/blob/master/extra/models/llama.py#L119
 # standard openai sampling
 def sample(
@@ -151,11 +176,15 @@ def sample(
     k: Optional[int]=0,
     p: Optional[float]=0.8,
     af: Optional[float] = 0.0,
-    ap: Optional[float] = 0.0
+    ap: Optional[float] = 0.0,
+    seen_tokens: list[int] | tuple[int, ...] | None = None,
+    repetition_penalty: float = 1.0,
 ):
     assert logits.ndim == 1, "only works on 1d tensors"
     assert 0 <= p <= 1, "p must be between 0 and 1"
     assert 0 <= k <= logits.numel(), "k must be between 0 and numel"
+
+    logits = _apply_repetition_penalty(logits, seen_tokens, float(repetition_penalty))
 
     # if temperature is very low just use argmax
     if temp < 1e-6: return logits.argmax()
@@ -213,13 +242,18 @@ def generate(
     top_p: Optional[float] = 0.8,
     alpha_f: Optional[float] = 0.0,
     alpha_p: Optional[float] = 0.0,
+    repetition_penalty: float = 1.0,
     curr_pos: int = 0,
     verbose: bool = False
 ) -> list:
+    if hasattr(model, "reset_kv_cache"):
+        model.reset_kv_cache()
+    if hasattr(sample, "alpha_counter"):
+        delattr(sample, "alpha_counter")
+
     # select device
-    if os.getenv("TC_DEVICE") is not None:
-        device = os.getenv("TC_DEVICE")
-    else:
+    configured_device = get_backend_device("tinygrad", default=None)
+    if configured_device is None:
         available_devices = tg.Device.DEFAULT.split(",")    
         if "METAL" in available_devices:
             device = "METAL"
@@ -230,10 +264,13 @@ def generate(
         else:
             print(f"Using default CPU device")
             device = "CPU"
+    else:
+        device = configured_device
 
     input_ids = input_ids.to(device)
     attention_mask = attention_mask.to(device)
     out_tokens = []
+    seen_tokens = [int(v) for row in input_ids.tolist() for v in row]
 
     position_ids = ((attention_mask.cumsum(axis=1) - 1) * attention_mask).to(device) # [B, S]
 
@@ -251,32 +288,39 @@ def generate(
 
     # prefill
     next_logit = logits[:, -1, :].flatten() # [B, V]
-    tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+    tok_sample = sample(
+        next_logit,
+        temp=temp,
+        k=top_k,
+        p=top_p,
+        af=alpha_f,
+        ap=alpha_p,
+        seen_tokens=seen_tokens,
+        repetition_penalty=repetition_penalty,
+    )
     tok = tok_sample.item()
     out_tokens.append(tok)
+    seen_tokens.append(int(tok))
     # toks/sec timer
     t0 = time.time()
     generated = 1
-    curr_pos += 1
+    if curr_pos <= 0:
+        curr_pos = int(position_ids[:, -1].max().item()) + 1
 
     eos_hit = False
 
     # first token sampled; appended to out_tokens above
 
-    limit = max_new_tokens - 1 if max_new_tokens > 0 else None
-
     while True:
-        if tok_sample == tokenizer.eos_token_id:
+        if tok == tokenizer.eos_token_id:
             elapsed = time.time() - t0
             tok_s = generated / elapsed if elapsed > 0 else float("inf")
             print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")
             eos_hit = True
             break
 
-        if limit is not None and generated >= limit:
+        if max_new_tokens > 0 and generated >= max_new_tokens:
             break
-
-        generated += 1
 
         next_tok = tg.Tensor([[tok]], device=device)  # [B, 1]
         # grow attention mask and use absolute position for the new token
@@ -296,9 +340,20 @@ def generate(
             position_ids=position_ids
         )
         next_logit = logits[:, -1, :].flatten()  # [B, V]
-        tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+        tok_sample = sample(
+            next_logit,
+            temp=temp,
+            k=top_k,
+            p=top_p,
+            af=alpha_f,
+            ap=alpha_p,
+            seen_tokens=seen_tokens,
+            repetition_penalty=repetition_penalty,
+        )
         tok = tok_sample.item()
         out_tokens.append(tok)
+        seen_tokens.append(int(tok))
+        generated += 1
         curr_pos += 1
 
     if not eos_hit:
@@ -327,8 +382,9 @@ def load_model_config(model_path: Path) -> Dict[str, Any]:
 async def load_model(
     model_id: str,
     shard: Shard = None,
-    weight_device: str = os.getenv("TC_DEVICE") or "CPU",
-    offline_mode: bool = False
+    weight_device: str | None = None,
+    offline_mode: bool = False,
+    progress_callback: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> tuple[Model, dict, AutoTokenizer, Path]:
     from tiny_cheetah.repos import RepoCustom
 
@@ -349,7 +405,7 @@ async def load_model(
     elif resolved_path is None and not offline_mode:
         logger.info("No path resolved to model %s, creating a new path %s and downloading model", model_id, cache_path)
         model_path = cache_path
-        model_path, model_config, _ = await model_repo.download()
+        model_path, model_config, _ = await model_repo.download(progress_callback=progress_callback)
     elif offline_mode:
         logger.error("Model %s not found in offline mode", model_id)
         raise FileNotFoundError(f"Model {model_id} not found in offline mode")
@@ -361,6 +417,10 @@ async def load_model(
             end_layer=model_config["num_layers"],
             total_layers=model_config["num_layers"]+1
         )
+
+    if weight_device is None:
+        weight_device = get_backend_device("tinygrad", default="CPU")
+        assert weight_device is not None
 
     model = Model(model_config, shard)
     if is_quantized_model_config(model_config):

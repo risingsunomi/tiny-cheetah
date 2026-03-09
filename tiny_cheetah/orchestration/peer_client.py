@@ -13,6 +13,7 @@ from contextlib import closing
 import asyncio
 
 from tiny_cheetah.logging_utils import get_logger
+from tiny_cheetah.models.llm.backend import get_backend_device, get_llm_backend
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.orchestration.model_engine import ModelEngine
 from tiny_cheetah.orchestration.cdevice import CDevice
@@ -27,11 +28,12 @@ class PeerClient:
         self.peer_client_id = os.getenv("TC_PEER_ID") or f"cheetah-{uuid.uuid4().hex[:6]}"
         self.address = "0.0.0.0"
         self.port = int(os.getenv("TC_PORT", "8765"))
+        peer_device = get_backend_device(get_llm_backend(), default="CPU") or "CPU"
         self.peer_device = CDevice(
             self.peer_client_id,
             self.address,
             self.port,
-            os.getenv("TC_DEVICE", "CPU")
+            peer_device,
         )
         self.shard = Shard("", 0, 0, 0)
         self.in_use = False

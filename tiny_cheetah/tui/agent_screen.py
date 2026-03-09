@@ -22,6 +22,7 @@ from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.agent.functions import AgentFunctions
 from tiny_cheetah.models.llm.backend import (
     detect_quantization_mode,
+    get_backend_device,
     get_llm_backend,
     load_model_for_backend,
 )
@@ -240,6 +241,7 @@ class AgentScreen(Screen[None]):
                 temperature=effective["temperature"],
                 top_k=int(effective["top_k"]),
                 top_p=effective["top_p"],
+                repetition_penalty=effective["repetition_penalty"],
                 alpha_f=effective["alpha_f"],
                 alpha_p=effective["alpha_p"],
             ),
@@ -310,6 +312,7 @@ class AgentScreen(Screen[None]):
             f"temp={self._gen_overrides.get('temperature')}, "
             f"top_k={self._gen_overrides.get('top_k')}, "
             f"top_p={self._gen_overrides.get('top_p')}, "
+            f"repetition_penalty={self._gen_overrides.get('repetition_penalty')}, "
             f"alpha_f={self._gen_overrides.get('alpha_f')}, "
             f"alpha_p={self._gen_overrides.get('alpha_p')}"
         )
@@ -333,6 +336,10 @@ class AgentScreen(Screen[None]):
             "temperature": _as_float(self._gen_overrides.get("temperature", config.get("temperature")), 1.0),
             "top_k": _as_int(self._gen_overrides.get("top_k", config.get("top_k")), 0),
             "top_p": _as_float(self._gen_overrides.get("top_p", config.get("top_p")), 0.8),
+            "repetition_penalty": _as_float(
+                self._gen_overrides.get("repetition_penalty", config.get("repetition_penalty")),
+                1.0,
+            ),
             "alpha_f": _as_float(self._gen_overrides.get("alpha_f", 0.0), 0.0),
             "alpha_p": _as_float(self._gen_overrides.get("alpha_p", 0.0), 0.0),
         }
@@ -652,6 +659,7 @@ class AgentScreen(Screen[None]):
         temp = float(gen_cfg["temperature"])
         top_k = int(gen_cfg["top_k"])
         top_p = float(gen_cfg["top_p"])
+        repetition_penalty = float(gen_cfg["repetition_penalty"])
         alpha_f = float(gen_cfg["alpha_f"])
         alpha_p = float(gen_cfg["alpha_p"])
 
@@ -680,6 +688,7 @@ class AgentScreen(Screen[None]):
             temp=temp,
             top_k=top_k,
             top_p=top_p,
+            repetition_penalty=repetition_penalty,
             alpha_f=alpha_f,
             alpha_p=alpha_p,
             verbose=False,
@@ -692,7 +701,7 @@ class AgentScreen(Screen[None]):
 
     @staticmethod
     def _torch_runtime_device() -> str:
-        device = str(os.getenv("TC_DEVICE", "cpu")).strip().lower()
+        device = str(get_backend_device("torch", default="cpu") or "cpu").strip().lower()
         if device in {"metal", "mps"}:
             return "mps"
         if device.startswith("cuda"):

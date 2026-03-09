@@ -1,5 +1,4 @@
 import asyncio
-import os
 from pathlib import Path
 import time
 import unittest
@@ -19,6 +18,7 @@ if torch is not None:
         load_quantized_safetensors,
     )
 
+from tiny_cheetah.models.llm.backend import get_backend_device
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.repos import RepoCustom
 
@@ -28,7 +28,7 @@ TOP_P = 0.9
 ALPHA_F = 0.0
 ALPHA_P = 0.0
 
-DEVICE = os.getenv("TC_DEVICE", "mps")
+DEVICE = get_backend_device("torch", default="mps") or "mps"
 
 @unittest.skipIf(torch is None, "torch is not installed")
 class TestQuantizedLlamaModel(unittest.TestCase):

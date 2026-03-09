@@ -4,9 +4,8 @@ Helpers for torch-based LLM models.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 import json
-import os
 import time
 
 import safetensors
@@ -14,6 +13,7 @@ import torch
 from transformers import AutoTokenizer
 
 from tiny_cheetah.logging_utils import get_logger
+from tiny_cheetah.models.llm.backend import get_backend_device
 from tiny_cheetah.models.shard import Shard
 
 from .load_progress import WeightLoadProgress
@@ -71,7 +71,7 @@ def apply_weight(
     if target is not None:
         weight = weight.to(device=target.device, dtype=target.dtype)
     else:
-        weight = weight.to(os.getenv("TC_DEVICE", "cpu"))
+        weight = weight.to(weight_device)
 
     model_state_dict[key] = weight
 
@@ -168,6 +168,28 @@ def load_safetensors(
     if incompatible.unexpected_keys:
         logger.warning("Unexpected torch checkpoint keys: %s", incompatible.unexpected_keys)
 
+
+def _apply_repetition_penalty(
+    logits: torch.Tensor,
+    seen_tokens: list[int] | tuple[int, ...] | None,
+    repetition_penalty: float,
+) -> torch.Tensor:
+    if repetition_penalty <= 0.0 or abs(repetition_penalty - 1.0) < 1e-6 or not seen_tokens:
+        return logits
+
+    seen = torch.tensor(seen_tokens, device=logits.device, dtype=torch.long).unique()
+    seen = seen[(seen >= 0) & (seen < logits.numel())]
+    if seen.numel() == 0:
+        return logits
+
+    penalized = logits.index_select(0, seen)
+    penalized = torch.where(
+        penalized < 0,
+        penalized * float(repetition_penalty),
+        penalized / float(repetition_penalty),
+    )
+    return logits.clone().scatter_(0, seen, penalized)
+
 # Standard openai-style sampling adapted for torch.
 def sample(
     logits: torch.Tensor,
@@ -176,6 +198,8 @@ def sample(
     p: Optional[float] = 0.8,
     af: Optional[float] = 0.0,
     ap: Optional[float] = 0.0,
+    seen_tokens: list[int] | tuple[int, ...] | None = None,
+    repetition_penalty: float = 1.0,
 ) -> torch.Tensor:
     if logits.ndim != 1:
         raise ValueError("only works on 1d tensors")
@@ -183,6 +207,8 @@ def sample(
         raise ValueError("p must be between 0 and 1")
     if not (0 <= k <= logits.numel()):
         raise ValueError("k must be between 0 and numel")
+
+    logits = _apply_repetition_penalty(logits, seen_tokens, float(repetition_penalty))
 
     if temp < 1e-6:
         return torch.argmax(logits)
@@ -250,15 +276,23 @@ def generate(
     top_p: Optional[float] = 0.8,
     alpha_f: Optional[float] = 0.0,
     alpha_p: Optional[float] = 0.0,
+    repetition_penalty: float = 1.0,
     curr_pos: int = 0,
     verbose: bool = False,
     on_token: Callable[[int], None] | None = None,
 ) -> list[int]:
-    device = os.getenv("TC_DEVICE", "cpu")
+    device = get_backend_device("torch", default="cpu")
+    assert device is not None
+
+    if hasattr(model, "reset_kv_cache"):
+        model.reset_kv_cache()
+    if hasattr(sample, "alpha_counter"):
+        delattr(sample, "alpha_counter")
 
     input_ids = input_ids.to(device=device, dtype=torch.long)
     attention_mask = attention_mask.to(device=device)
     out_tokens: list[int] = []
+    seen_tokens = input_ids.flatten().tolist()
 
     position_ids = ((attention_mask.cumsum(dim=1) - 1) * attention_mask).to(
         device=device,
@@ -282,18 +316,27 @@ def generate(
         )
 
         next_logit = logits[:, -1, :].flatten()
-        tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+        tok_sample = sample(
+            next_logit,
+            temp=temp,
+            k=top_k,
+            p=top_p,
+            af=alpha_f,
+            ap=alpha_p,
+            seen_tokens=seen_tokens,
+            repetition_penalty=repetition_penalty,
+        )
         tok = int(tok_sample.item())
         out_tokens.append(tok)
+        seen_tokens.append(tok)
         if on_token is not None:
             on_token(tok)
 
         t0 = time.time()
         generated = 1
-        curr_pos += 1
+        if curr_pos <= 0:
+            curr_pos = int(position_ids[:, -1].max().item()) + 1
         eos_hit = False
-
-        limit = max_new_tokens - 1 if max_new_tokens > 0 else None
 
         while True:
             if tok == tokenizer.eos_token_id:
@@ -303,10 +346,8 @@ def generate(
                 eos_hit = True
                 break
 
-            if limit is not None and generated >= limit:
+            if max_new_tokens > 0 and generated >= max_new_tokens:
                 break
-
-            generated += 1
 
             next_tok = torch.tensor([[tok]], device=device, dtype=torch.long)
             attention_mask = torch.cat(
@@ -331,11 +372,22 @@ def generate(
                 position_ids=position_ids,
             )
             next_logit = logits[:, -1, :].flatten()
-            tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+            tok_sample = sample(
+                next_logit,
+                temp=temp,
+                k=top_k,
+                p=top_p,
+                af=alpha_f,
+                ap=alpha_p,
+                seen_tokens=seen_tokens,
+                repetition_penalty=repetition_penalty,
+            )
             tok = int(tok_sample.item())
             out_tokens.append(tok)
+            seen_tokens.append(tok)
             if on_token is not None:
                 on_token(tok)
+            generated += 1
             curr_pos += 1
 
     if not eos_hit:
@@ -363,8 +415,9 @@ def load_model_config(model_path: Path) -> Dict[str, Any]:
 async def load_model(
     model_id: str,
     shard: Shard = None,
-    weight_device: str = os.getenv("TC_DEVICE") or "cpu",
+    weight_device: str | torch.device | None = None,
     offline_mode: bool = False,
+    progress_callback: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> tuple[Model, dict, AutoTokenizer, Path]:
     from tiny_cheetah.repos import RepoCustom
 
@@ -389,7 +442,7 @@ async def load_model(
             cache_path,
         )
         model_path = cache_path
-        model_path, model_config, _ = await model_repo.download()
+        model_path, model_config, _ = await model_repo.download(progress_callback=progress_callback)
     elif offline_mode:
         logger.error("Model %s not found in offline mode", model_id)
         raise FileNotFoundError(f"Model {model_id} not found in offline mode")
@@ -402,8 +455,12 @@ async def load_model(
             total_layers=model_config["num_layers"] + 1,
         )
 
+    if weight_device is None:
+        weight_device = get_backend_device("torch", default="cpu")
+        assert weight_device is not None
+
     model = Model(model_config, shard)
-    model.to(os.getenv("TC_DEVICE", "cpu"))
+    model.to(get_backend_device("torch", default="cpu"))
     if is_quantized_model_config(model_config):
         logger.info("Detected quantized model for %s, loading with torch NF4 loader.", model_id)
         load_quantized_safetensors(

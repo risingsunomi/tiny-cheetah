@@ -19,6 +19,7 @@ from textual.widgets import RichLog
 from tiny_cheetah.models.llm.backend import (
     backend_helpers_module,
     detect_quantization_mode as detect_quantization_mode_backend,
+    get_backend_device,
 )
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.orchestration.model_engine import ModelEngine
@@ -122,6 +123,7 @@ def streaming_generate(
     top_p: float = 0.8,
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,
+    repetition_penalty: float = 1.0,
     verbose: bool = False,
     on_token: TokenCallback | None = None,
     abort_check: AbortCheck | None = None,
@@ -138,6 +140,7 @@ def streaming_generate(
             top_p=top_p,
             alpha_f=alpha_f,
             alpha_p=alpha_p,
+            repetition_penalty=repetition_penalty,
             verbose=verbose,
             on_token=on_token,
             abort_check=abort_check,
@@ -149,27 +152,37 @@ def streaming_generate(
     attention_mask = attention_mask.to(device)
 
     out_tokens: list[int] = []
-    curr_pos = attention_mask.shape[1]
+    curr_pos = attention_mask.shape[1] - 1
     generated = 0
     start_time = time.time()
+    seen_tokens = [int(v) for row in input_ids.tolist() for v in row]
 
     # initial prefill
     position_ids = ((attention_mask.cumsum(axis=1) - 1) * attention_mask).to(device)
     logits = model(input_ids, attention_mask=attention_mask, position_ids=position_ids)
     next_logit = logits[:, -1, :].flatten()
-    tok = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+    tok = _sample_with_backend(
+        next_logit,
+        temp=temp,
+        k=top_k,
+        p=top_p,
+        af=alpha_f,
+        ap=alpha_p,
+        repetition_penalty=repetition_penalty,
+        seen_tokens=seen_tokens,
+    ).item()
     out_tokens.append(tok)
+    seen_tokens.append(int(tok))
     if on_token is not None:
         on_token(int(tok))
     generated += 1
     curr_pos += 1
 
     eos_hit = tok == tokenizer.eos_token_id
-    limit = max_new_tokens - 1 if max_new_tokens > 0 else None
 
     while not eos_hit:
         _raise_if_abort(abort_check)
-        if limit is not None and generated >= limit:
+        if max_new_tokens > 0 and generated >= max_new_tokens:
             break
 
         next_tok = tg.Tensor([[tok]], device=device)
@@ -184,8 +197,18 @@ def streaming_generate(
             position_ids=position_ids,
         )
         next_logit = logits[:, -1, :].flatten()
-        tok = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p).item()
+        tok = _sample_with_backend(
+            next_logit,
+            temp=temp,
+            k=top_k,
+            p=top_p,
+            af=alpha_f,
+            ap=alpha_p,
+            repetition_penalty=repetition_penalty,
+            seen_tokens=seen_tokens,
+        ).item()
         out_tokens.append(tok)
+        seen_tokens.append(int(tok))
         if on_token is not None:
             on_token(int(tok))
         generated += 1
@@ -214,6 +237,7 @@ def _streaming_generate_torch(
     top_p: float = 0.8,
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,
+    repetition_penalty: float = 1.0,
     verbose: bool = False,
     on_token: TokenCallback | None = None,
     abort_check: AbortCheck | None = None,
@@ -222,12 +246,14 @@ def _streaming_generate_torch(
         raise RuntimeError("Torch tensor generation requested but torch is unavailable")
 
     _raise_if_abort(abort_check)
-    device = os.getenv("TC_DEVICE", "cpu")
+    device = get_backend_device("torch", default="cpu")
+    assert device is not None
     input_ids = input_ids.to(device=device, dtype=torch.long)
     attention_mask = attention_mask.to(device=device, dtype=torch.long)
 
     out_tokens: list[int] = []
     curr_pos = int(input_ids.shape[1] - 1)
+    seen_tokens = input_ids.flatten().tolist()
     position_ids = ((attention_mask.cumsum(dim=1) - 1) * attention_mask).to(
         device=device,
         dtype=torch.long,
@@ -239,9 +265,19 @@ def _streaming_generate_torch(
         position_ids=position_ids,
     )
     next_logit = logits[:, -1, :].flatten()
-    tok_sample = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+    tok_sample = _sample_with_backend(
+        next_logit,
+        temp=temp,
+        k=top_k,
+        p=top_p,
+        af=alpha_f,
+        ap=alpha_p,
+        repetition_penalty=repetition_penalty,
+        seen_tokens=seen_tokens,
+    )
     tok = int(tok_sample.item())
     out_tokens.append(tok)
+    seen_tokens.append(tok)
     if on_token is not None:
         on_token(tok)
 
@@ -249,11 +285,9 @@ def _streaming_generate_torch(
     generated = 1
     curr_pos += 1
     eos_hit = tok == tokenizer.eos_token_id
-    limit = max_new_tokens - 1 if max_new_tokens > 0 else None
-
     while not eos_hit:
         _raise_if_abort(abort_check)
-        if limit is not None and generated >= limit:
+        if max_new_tokens > 0 and generated >= max_new_tokens:
             break
 
         next_tok = torch.tensor([[tok]], device=device, dtype=torch.long)
@@ -271,9 +305,19 @@ def _streaming_generate_torch(
             position_ids=position_ids,
         )
         next_logit = logits[:, -1, :].flatten()
-        tok_sample = _sample_with_backend(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+        tok_sample = _sample_with_backend(
+            next_logit,
+            temp=temp,
+            k=top_k,
+            p=top_p,
+            af=alpha_f,
+            ap=alpha_p,
+            repetition_penalty=repetition_penalty,
+            seen_tokens=seen_tokens,
+        )
         tok = int(tok_sample.item())
         out_tokens.append(tok)
+        seen_tokens.append(tok)
         if on_token is not None:
             on_token(tok)
         generated += 1
@@ -299,6 +343,7 @@ def streaming_generate_with_peers(
     top_p: float = 0.8,
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,
+    repetition_penalty: float = 1.0,
     verbose: bool = False,
     on_token: TokenCallback | None = None,
     abort_check: AbortCheck | None = None,
@@ -318,6 +363,7 @@ def streaming_generate_with_peers(
             top_p,
             alpha_f,
             alpha_p,
+            repetition_penalty,
             verbose,
             on_token,
             abort_check,
@@ -340,6 +386,7 @@ def streaming_generate_with_peers(
             top_p,
             alpha_f,
             alpha_p,
+            repetition_penalty,
             verbose,
             on_token,
             abort_check,
@@ -352,6 +399,7 @@ def streaming_generate_with_peers(
     mask_list = _tensor_to_list(attention_mask)
     position_list = [[0]]
     hidden_state_list = []
+    seen_tokens = [int(v) for row in input_list for v in row]
 
     out_tokens: list[int] = []
     start_time = time.time()
@@ -372,8 +420,11 @@ def streaming_generate_with_peers(
             top_p=top_p,
             alpha_f=alpha_f,
             alpha_p=alpha_p,
+            repetition_penalty=repetition_penalty,
+            seen_tokens=seen_tokens,
         )
 
+        prev_len = len(out_tokens)
         mask_list, position_list, hidden_state_list, end_token = _apply_token_data(
             engine,
             tokenizer,
@@ -386,6 +437,8 @@ def streaming_generate_with_peers(
             backend=backend,
             on_token=on_token,
         )
+        if len(out_tokens) > prev_len:
+            seen_tokens.extend(int(tok) for tok in out_tokens[prev_len:])
 
         if end_token:
             break
@@ -403,6 +456,8 @@ def streaming_generate_with_peers(
                     "top_p": top_p,
                     "alpha_f": alpha_f,
                     "alpha_p": alpha_p,
+                    "repetition_penalty": repetition_penalty,
+                    "seen_tokens": seen_tokens,
                     "shard": _peer_shard_payload(peer),
                 },
             }
@@ -425,6 +480,7 @@ def streaming_generate_with_peers(
                 logger.error(f"Error communicating with peer {_peer_identifier(peer)}: {err}")
                 break
 
+            prev_len = len(out_tokens)
             mask_list, position_list, hidden_state_list, end_token = _apply_token_data(
                 engine,
                 tokenizer,
@@ -437,6 +493,8 @@ def streaming_generate_with_peers(
                 backend=backend,
                 on_token=on_token,
             )
+            if len(out_tokens) > prev_len:
+                seen_tokens.extend(int(tok) for tok in out_tokens[prev_len:])
             
             if end_token:
                 break

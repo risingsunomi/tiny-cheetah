@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import Any
-
+from typing import Any, Awaitable, Callable
 
 LLM_BACKEND_ENV = "TC_LLM_BACKEND"
+TORCH_DEVICE_ENV = "TC_TORCH_DEVICE"
+TINYGRAD_DEVICE_ENV = "TC_TINYGRAD_DEVICE"
 DEFAULT_LLM_BACKEND = "tinygrad"
 SUPPORTED_LLM_BACKENDS = {"tinygrad", "torch"}
+_UNSET = object()
+_BACKEND_DEVICE_ENVS = {
+    "tinygrad": TINYGRAD_DEVICE_ENV,
+    "torch": TORCH_DEVICE_ENV,
+}
+_BACKEND_DEFAULT_DEVICES = {
+    "tinygrad": "CPU",
+    "torch": "cpu",
+}
 
 
 def normalize_llm_backend(value: str | None) -> str:
@@ -21,6 +31,57 @@ def normalize_llm_backend(value: str | None) -> str:
 
 def get_llm_backend() -> str:
     return normalize_llm_backend(os.getenv(LLM_BACKEND_ENV))
+
+
+def backend_device_env(backend: str | None = None) -> str:
+    selected = normalize_llm_backend(backend or os.getenv(LLM_BACKEND_ENV))
+    return _BACKEND_DEVICE_ENVS[selected]
+
+
+def default_backend_device(backend: str | None = None) -> str:
+    selected = normalize_llm_backend(backend or os.getenv(LLM_BACKEND_ENV))
+    return _BACKEND_DEFAULT_DEVICES[selected]
+
+
+def normalize_backend_device(value: str | None, backend: str | None = None) -> str:
+    selected = normalize_llm_backend(backend or os.getenv(LLM_BACKEND_ENV))
+    raw = str(value or "").strip()
+    if not raw:
+        return default_backend_device(selected)
+
+    if selected == "torch":
+        normalized = raw.lower()
+        return "mps" if normalized == "metal" else normalized
+
+    normalized = raw.upper()
+    return "METAL" if normalized == "MPS" else normalized
+
+
+def get_backend_device(
+    backend: str | None = None,
+    *,
+    default: str | None | object = _UNSET
+) -> str | None:
+    selected = normalize_llm_backend(backend or os.getenv(LLM_BACKEND_ENV))
+    env_name = backend_device_env(selected)
+    configured = os.getenv(env_name)
+    if configured is not None and configured.strip():
+        return normalize_backend_device(configured, selected)
+
+    if default is _UNSET:
+        return default_backend_device(selected)
+    if default is None:
+        return None
+    return normalize_backend_device(str(default), selected)
+
+def set_backend_device(
+    value: str | None,
+    backend: str | None = None
+) -> str:
+    selected = normalize_llm_backend(backend or os.getenv(LLM_BACKEND_ENV))
+    device = normalize_backend_device(value, selected)
+    os.environ[backend_device_env(selected)] = device
+    return device
 
 
 def set_llm_backend(value: str | None) -> str:
@@ -78,6 +139,7 @@ async def load_model_for_backend(
     weight_device: str | None = None,
     offline_mode: bool = False,
     backend: str | None = None,
+    progress_callback: Callable[[str], Awaitable[None] | None] | None = None,
 ):
     helpers = backend_helpers_module(backend=backend)
     return await helpers.load_model(
@@ -85,6 +147,7 @@ async def load_model_for_backend(
         shard=shard,
         weight_device=weight_device,
         offline_mode=offline_mode,
+        progress_callback=progress_callback,
     )
 
 
