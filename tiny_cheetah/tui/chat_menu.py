@@ -22,6 +22,7 @@ from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
 from tiny_cheetah.tui.chat_log_storage import ChatLogStorage, ChatLogSummary, ChatMessage
 from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
+from tiny_cheetah.tui.help_screen import HelpScreen
 from tiny_cheetah.tui.helpers import MemoryPressureError, memory_abort_reason
 
 from textual.app import ComposeResult
@@ -64,7 +65,8 @@ class ChatScreen(Screen[None]):
     BINDINGS = [("escape", "pop_screen", "Back"),
         ("b", "pop_screen", "Back"),
         ("ctrl+s", "open_model_picker", "Select Model"),
-        ("ctrl+n", "open_orchestration", "Network Nodes")
+        ("ctrl+n", "open_orchestration", "Network Nodes"),
+        ("h", "open_help", "Help"),
     ]
 
     def __init__(self, peer_client: PeerClient, default_model: str | None = None, offline: bool = False) -> None:
@@ -159,6 +161,9 @@ class ChatScreen(Screen[None]):
 
     def action_open_orchestration(self) -> None:
         self.app.push_screen(OrchestrationScreen(self._peer_client))
+
+    def action_open_help(self) -> None:
+        self.app.push_screen(HelpScreen("Chat Help", self._help_text()))
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "open-model-picker":
@@ -395,6 +400,23 @@ class ChatScreen(Screen[None]):
                 f"the active context window ({context_window} tokens)."
             ),
         })
+
+    @staticmethod
+    def _help_text() -> str:
+        return "\n".join(
+            [
+                "Chat Screen",
+                "- Enter: Send message",
+                "- Ctrl+S: Select model",
+                "- Ctrl+N: Open network nodes",
+                "- h: Open help",
+                "- b / Esc: Back to main menu",
+                "",
+                "Tips",
+                "- Use 'Load Model' before chatting.",
+                "- 'Gen Config' changes temperature/top-k/top-p and penalties.",
+            ]
+        )
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":

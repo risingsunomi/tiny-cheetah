@@ -258,6 +258,83 @@ class TestQuantizedLoader(unittest.TestCase):
             expected = _permute(torch.from_numpy(raw_weight), 2).to(dtype=model.q_proj.weight.dtype)
             torch.testing.assert_close(model.q_proj.weight.detach().cpu(), expected)
 
+    def test_load_quantized_safetensors_skips_qproj_permute_for_gpt_oss(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            weight_file = "model.safetensors"
+            key = "model.q_proj.weight"
+
+            raw_weight = np.arange(32, dtype=np.float32).reshape(8, 4)
+            save_file({key: raw_weight}, str(model_dir / weight_file))
+            _write_model_index(model_dir, {key: weight_file})
+
+            model = _DummyQProjModel()
+            load_quantized_safetensors(
+                model,
+                model_dir,
+                model_config={"num_heads": 2, "num_kv_heads": 1, "model_type": "gpt_oss"},
+                weight_device="cpu",
+                use_tied=False,
+            )
+
+            expected = torch.from_numpy(raw_weight).to(dtype=model.q_proj.weight.dtype)
+            torch.testing.assert_close(model.q_proj.weight.detach().cpu(), expected)
+
+    def test_load_quantized_safetensors_without_index_scans_all_shards(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            key = "model.output.weight"
+
+            save_file({"model.embed_tokens.weight": np.zeros((4, 4), dtype=np.float32)}, str(model_dir / "a.safetensors"))
+            plain_weight = np.arange(16, dtype=np.float32).reshape(4, 4)
+            save_file({key: plain_weight}, str(model_dir / "b.safetensors"))
+
+            model = _DummyTiedModel(vocab_size=4, embed_dim=4)
+            load_quantized_safetensors(
+                model,
+                model_dir,
+                model_config={},
+                weight_device="cpu",
+                use_tied=False,
+            )
+
+            expected = torch.from_numpy(plain_weight).to(dtype=model.output.weight.dtype)
+            torch.testing.assert_close(model.output.weight.detach().cpu(), expected)
+
+    def test_load_quantized_safetensors_with_index_infers_model_prefix_even_if_first_key_is_lm_head(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            weight_file = "model.safetensors"
+            key = "model.q_proj.weight"
+            raw_weight = np.arange(32, dtype=np.float32).reshape(8, 4)
+
+            save_file(
+                {
+                    "lm_head.weight": np.zeros((4, 4), dtype=np.float32),
+                    key: raw_weight,
+                },
+                str(model_dir / weight_file),
+            )
+            _write_model_index(
+                model_dir,
+                {
+                    "lm_head.weight": weight_file,
+                    key: weight_file,
+                },
+            )
+
+            model = _DummyQProjModel()
+            load_quantized_safetensors(
+                model,
+                model_dir,
+                model_config={"num_heads": 2, "num_kv_heads": 1, "model_type": "gpt_oss"},
+                weight_device="cpu",
+                use_tied=False,
+            )
+
+            expected = torch.from_numpy(raw_weight).to(dtype=model.q_proj.weight.dtype)
+            torch.testing.assert_close(model.q_proj.weight.detach().cpu(), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

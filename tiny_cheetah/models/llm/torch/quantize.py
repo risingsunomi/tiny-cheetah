@@ -16,6 +16,8 @@ import torch
 
 from tiny_cheetah.logging_utils import get_logger
 
+from .load_progress import WeightLoadProgress
+
 logger = get_logger(__name__)
 
 
@@ -67,10 +69,19 @@ def _load_weight_map(model_path: Path) -> dict[str, str]:
             return dict(safe_index["weight_map"])
 
     weight_map: dict[str, str] = {}
-    with safetensors.safe_open(str(model_files[0]), framework="numpy") as weight_data:
-        for key in weight_data.keys():
-            weight_map[key] = model_files[0].name
+    for model_file in model_files:
+        with safetensors.safe_open(str(model_file), framework="numpy") as weight_data:
+            for key in weight_data.keys():
+                weight_map[key] = model_file.name
     return weight_map
+
+
+def _infer_prefix(weight_map: Mapping[str, str]) -> str:
+    for candidate in ("model", "base_model", "transformer", "gpt_neox", "blk"):
+        prefix = f"{candidate}."
+        if any(key.startswith(prefix) for key in weight_map):
+            return prefix
+    return ""
 
 
 def _load_quant_state(raw_state: np.ndarray) -> dict[str, Any]:
@@ -225,9 +236,11 @@ def _apply_weight(
     else:
         weight = torch.from_numpy(weight_np)
 
-    if "q_proj" in key:
+    model_type = str(model_config.get("model_type", "")).lower()
+    needs_qk_permute = model_type not in {"gpt_oss"}
+    if needs_qk_permute and "q_proj" in key:
         weight = _permute(weight, model_config["num_heads"])
-    elif "k_proj" in key:
+    elif needs_qk_permute and "k_proj" in key:
         weight = _permute(weight, model_config["num_kv_heads"])
 
     target = model_state_dict.get(key)
@@ -249,18 +262,20 @@ def load_quantized_safetensors(
     weight_map = _load_weight_map(model_path)
     model_state_dict = model.state_dict()
 
-    first_weight_key = next(iter(weight_map.keys()))
-    prefix_check = first_weight_key.split(".")[0]
-    if prefix_check in {"model", "base_model", "transformer", "gpt_neox", "blk"}:
-        prefix = prefix_check + "."
-    else:
-        prefix = ""
+    prefix = _infer_prefix(weight_map)
+    progress = WeightLoadProgress(total=len(model_state_dict), label="torch-qload")
 
-    for key in model_state_dict.keys():
+    for idx, key in enumerate(model_state_dict.keys(), start=1):
         model_weight_key = prefix + key
         if model_weight_key not in weight_map:
             if use_tied and key == "output.weight":
                 embed_weight_key = "model.embed_tokens.weight"
+                progress.update(
+                    idx,
+                    key,
+                    embed_weight_key,
+                    weight_map.get(embed_weight_key),
+                )
                 _apply_weight(
                     embed_weight_key,
                     key,
@@ -273,6 +288,12 @@ def load_quantized_safetensors(
                 continue
 
             if key == "output.weight" and "lm_head.weight" in weight_map:
+                progress.update(
+                    idx,
+                    key,
+                    "lm_head.weight",
+                    weight_map.get("lm_head.weight"),
+                )
                 _apply_weight(
                     "lm_head.weight",
                     key,
@@ -284,6 +305,12 @@ def load_quantized_safetensors(
                 )
             continue
 
+        progress.update(
+            idx,
+            key,
+            model_weight_key,
+            weight_map.get(model_weight_key),
+        )
         _apply_weight(
             model_weight_key,
             key,
@@ -294,4 +321,9 @@ def load_quantized_safetensors(
             model_config,
         )
 
-    model.load_state_dict(model_state_dict, strict=False)
+    incompatible = model.load_state_dict(model_state_dict, strict=False)
+    progress.done()
+    if incompatible.missing_keys:
+        logger.warning("Missing quantized torch checkpoint keys: %s", incompatible.missing_keys)
+    if incompatible.unexpected_keys:
+        logger.warning("Unexpected quantized torch checkpoint keys: %s", incompatible.unexpected_keys)

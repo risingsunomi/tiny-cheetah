@@ -12,6 +12,7 @@ from textual.widgets import Footer, Header, Label, Static
 
 from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.connect_peer_screen import ConnectPeerScreen
+from tiny_cheetah.tui.help_screen import HelpScreen
 from tiny_cheetah.tui.peer_directory_screen import PeerDirectoryScreen
 
 
@@ -26,6 +27,7 @@ class OrchestrationScreen(Screen[None]):
         ("r", "refresh_panels", "Refresh data"),
         ("a", "open_connect", "Add peer (IP)"),
         ("p", "open_peers", "Peer directory"),
+        ("h", "open_help", "Help"),
     ]
 
     def __init__(self, peer_client: PeerClient) -> None:
@@ -68,6 +70,9 @@ class OrchestrationScreen(Screen[None]):
 
     def action_open_peers(self) -> None:
         self.app.push_screen(PeerDirectoryScreen(self._peer_client))
+
+    def action_open_help(self) -> None:
+        self.app.push_screen(HelpScreen("Network Help", self._help_text()))
     
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
@@ -201,6 +206,19 @@ class OrchestrationScreen(Screen[None]):
 
     def _update_action_variants(self) -> None:
         return
+
+    @staticmethod
+    def _help_text() -> str:
+        return "\n".join(
+            [
+                "Network / Orchestration Screen",
+                "- r: Refresh host and peer panels",
+                "- a: Add peer by IP",
+                "- p: Open peer directory",
+                "- h: Open this help screen",
+                "- b / Esc: Back",
+            ]
+        )
 
     @staticmethod
     def _peer_entry_to_obj(peer: object) -> object | None:

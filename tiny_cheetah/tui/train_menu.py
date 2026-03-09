@@ -19,6 +19,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Log, Static
 from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.orchestration_screen import OrchestrationScreen
+from tiny_cheetah.tui.help_screen import HelpScreen
 from rich.markup import escape
 
 from tiny_cheetah.tui.training_path_types import TrainingNode, NODE_STATUS_STYLES, NODE_STATUS_SYMBOLS
@@ -152,6 +153,7 @@ class TrainScreen(Screen[None]):
         ("s", "start_training", "Start training"),
         ("x", "stop_training", "Stop training"),
         ("n", "open_network", "Network"),
+        ("h", "open_help", "Help"),
     ]
 
     @staticmethod
@@ -288,6 +290,25 @@ class TrainScreen(Screen[None]):
     
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
+
+    def action_start_training(self) -> None:
+        self._start_training()
+
+    def action_stop_training(self) -> None:
+        self._stop_training()
+
+    def action_open_network(self) -> None:
+        self.app.push_screen(OrchestrationScreen(self._peer_client))
+
+    def action_open_help(self) -> None:
+        self.app.push_screen(HelpScreen("Train Help", self._help_text()))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "open-settings":
+            self._open_settings()
+        elif button_id == "open-training-path":
+            self._open_training_path()
 
     def _open_settings(self) -> None:
         screen = TrainSettingsScreen(dict(self._settings))
@@ -584,10 +605,18 @@ class TrainScreen(Screen[None]):
         self._sync_base_node_name()
 
     def _set_buttons(self, *, running: bool) -> None:
-        start_btn = self.query_one("#start-training", Button)
-        stop_btn = self.query_one("#stop-training", Button)
-        start_btn.disabled = running
-        stop_btn.disabled = not running
+        try:
+            start_btn = self.query_one("#start-training", Button)
+        except Exception:
+            start_btn = None
+        try:
+            stop_btn = self.query_one("#stop-training", Button)
+        except Exception:
+            stop_btn = None
+        if start_btn is not None:
+            start_btn.disabled = running
+        if stop_btn is not None:
+            stop_btn.disabled = not running
 
     def _parse_training_line(self, line: str) -> None:
         step_match = re.search(r"step=(\d+)", line)
@@ -670,6 +699,23 @@ class TrainScreen(Screen[None]):
             return
         count = self._peer_client.peer_count()
         self.app.title = f"[Nodes: {count}]"
+
+    @staticmethod
+    def _help_text() -> str:
+        return "\n".join(
+            [
+                "Train Screen",
+                "- s: Start training",
+                "- x: Stop training",
+                "- n: Open network screen",
+                "- h: Open this help screen",
+                "- b / Esc: Back",
+                "",
+                "Buttons",
+                "- Edit Settings: configure train.py args",
+                "- Training Path: edit sequential training steps",
+            ]
+        )
 
 
 class TrainSettingsScreen(ModalScreen[Dict[str, object]]):

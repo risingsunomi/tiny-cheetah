@@ -65,9 +65,9 @@ class ModelConfig:
             "tie_word_embeddings": base_config.get("tie_word_embeddings", False),
             "model_type": base_config.get("model_type", ""),
             "quantization_config": base_config.get("quantization_config"),
-            "temperature": 0.0,
-            "top_k": 0,
-            "top_p": 0.0,
+            "temperature": None,
+            "top_k": None,
+            "top_p": None,
             "eos_token_id": None,
             "pad_token_id": None,
             "bos_token_id": None,
@@ -110,18 +110,21 @@ class ModelConfig:
         
         if os.getenv("TC_TEMP") is not None:
             self.config["temperature"] = float(os.getenv("TC_TEMP"))
-        else:
-            self.config["temperature"] = gen_config.get("temperature", 0.0)
+        elif "temperature" in gen_config:
+            temp = gen_config["temperature"]
+            self.config["temperature"] = None if temp is None else float(temp)
             
         if os.getenv("TC_TOP_K") is not None:
             self.config["top_k"] = int(os.getenv("TC_TOP_K"))
-        else:
-            self.config["top_k"] = gen_config.get("top_k", 0)
+        elif "top_k" in gen_config:
+            top_k = gen_config["top_k"]
+            self.config["top_k"] = None if top_k is None else int(top_k)
 
         if os.getenv("TC_TOP_P") is not None:
             self.config["top_p"] = float(os.getenv("TC_TOP_P"))
-        else:
-            self.config["top_p"] = gen_config.get("top_p", 0.0)
+        elif "top_p" in gen_config:
+            top_p = gen_config["top_p"]
+            self.config["top_p"] = None if top_p is None else float(top_p)
 
         self.config["eos_token_id"] = gen_config.get("eos_token_id")
         self.config["pad_token_id"] = gen_config.get("pad_token_id")

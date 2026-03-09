@@ -48,30 +48,49 @@ class ModelConfig:
             "norm_eps": base_config.get("rms_norm_eps", base_config.get("norm_eps", 1e-6)),
             "rope_scaling": base_config.get("rope_scaling", None),
             "rope_theta": base_config.get("rope_theta", 100000.0),
+            "layer_types": list(base_config.get("layer_types", [])),
+            "sliding_window": int(base_config.get("sliding_window", 0) or 0),
             "vocab_size": base_config.get("vocab_size", 0),
             "num_layers": base_config.get("num_hidden_layers", 0),
-            "attn_bias": base_config.get("attention_bias", False),
+            "attn_bias": base_config.get("attention_bias", base_config.get("attn_bias", False)),
             "mlp_bias": base_config.get("mlp_bias", False),
+            "lm_head_bias": base_config.get("lm_head_bias", base_config.get("output_bias", False)),
             "hidden_act": base_config.get("hidden_act", "silu"),
+            "initializer_range": float(base_config.get("initializer_range", 0.02)),
             "torch_dtype": hf_precision_str_to_dtype.get(
                 base_config.get("torch_dtype", "bfloat16"),
                 torch.bfloat16,
             ),
             "tie_word_embeddings": base_config.get("tie_word_embeddings", False),
             "model_type": base_config.get("model_type", ""),
+            "num_local_experts": int(base_config.get("num_local_experts", base_config.get("num_experts", 0)) or 0),
+            "experts_per_token": int(
+                base_config.get("experts_per_token", base_config.get("num_experts_per_tok", 0)) or 0
+            ),
+            "num_experts_per_tok": int(
+                base_config.get("num_experts_per_tok", base_config.get("experts_per_token", 0)) or 0
+            ),
+            "swiglu_limit": float(base_config.get("swiglu_limit", 7.0)),
+            "initial_context_length": int(base_config.get("initial_context_length", 0) or 0),
+            "output_router_logits": bool(base_config.get("output_router_logits", False)),
+            "router_aux_loss_coef": float(base_config.get("router_aux_loss_coef", 0.0)),
+            "use_cache": bool(base_config.get("use_cache", True)),
+            "transformers_version": str(base_config.get("transformers_version", "")),
             "quantization_config": base_config.get("quantization_config"),
-            "temperature": 0.0,
-            "top_k": 0,
-            "top_p": 0.0,
-            "eos_token_id": None,
-            "pad_token_id": None,
-            "bos_token_id": None,
+            "temperature": None,
+            "top_k": None,
+            "top_p": None,
+            "eos_token_id": base_config.get("eos_token_id"),
+            "pad_token_id": base_config.get("pad_token_id"),
+            "bos_token_id": base_config.get("bos_token_id"),
         }
 
         self.config["rope_scaling_factor"] = None
         self.config["rope_low_freq_factor"] = 0.0
         self.config["rope_high_freq_factor"] = 0.0
         self.config["rope_original_max_pos_embeddings"] = 0
+        self.config["rope_type"] = "default"
+        self.config["rope_truncate"] = True
 
         rope_scaling = self.config.get("rope_scaling")
         if rope_scaling is not None:
@@ -83,6 +102,7 @@ class ModelConfig:
                 rope_scaling.get("original_max_pos", 0),
             )
             self.config["rope_type"] = rope_scaling.get("rope_type", "llama3")
+            self.config["rope_truncate"] = bool(rope_scaling.get("truncate", True))
 
         attn_qk_norm = base_config.get("attn_qk_norm")
         if isinstance(attn_qk_norm, bool):
@@ -93,6 +113,16 @@ class ModelConfig:
             self.config["qk_norm"] = True
         else:
             self.config["qk_norm"] = False
+
+        if self.config.get("model_type") == "gpt_oss":
+            # GPT-OSS exposes separate attention and expert bias tensors.
+            self.config["attn_bias"] = True
+            self.config["mlp_bias"] = True
+
+        self.config["moe"] = bool(
+            self.config.get("num_local_experts", 0) > 0
+            and self.config.get("num_experts_per_tok", 0) > 0
+        )
 
         custom_seq = os.getenv("TC_MAX_SEQ_LEN")
         if custom_seq is not None:
@@ -106,18 +136,21 @@ class ModelConfig:
 
         if os.getenv("TC_TEMP") is not None:
             self.config["temperature"] = float(os.getenv("TC_TEMP"))
-        else:
-            self.config["temperature"] = gen_config.get("temperature", 0.0)
+        elif "temperature" in gen_config:
+            temp = gen_config["temperature"]
+            self.config["temperature"] = None if temp is None else float(temp)
 
         if os.getenv("TC_TOP_K") is not None:
             self.config["top_k"] = int(os.getenv("TC_TOP_K"))
-        else:
-            self.config["top_k"] = gen_config.get("top_k", 0)
+        elif "top_k" in gen_config:
+            top_k = gen_config["top_k"]
+            self.config["top_k"] = None if top_k is None else int(top_k)
 
         if os.getenv("TC_TOP_P") is not None:
             self.config["top_p"] = float(os.getenv("TC_TOP_P"))
-        else:
-            self.config["top_p"] = gen_config.get("top_p", 0.0)
+        elif "top_p" in gen_config:
+            top_p = gen_config["top_p"]
+            self.config["top_p"] = None if top_p is None else float(top_p)
 
         self.config["eos_token_id"] = gen_config.get("eos_token_id")
         self.config["pad_token_id"] = gen_config.get("pad_token_id")

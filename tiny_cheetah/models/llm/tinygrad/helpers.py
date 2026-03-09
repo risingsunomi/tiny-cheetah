@@ -17,7 +17,6 @@ from .model_config import ModelConfig
 from .quantize import is_quantized_model_config, load_quantized_safetensors
 from tiny_cheetah.models.shard import Shard
 from tiny_cheetah.logging_utils import get_logger
-from tiny_cheetah.repos import RepoCustom
 
 logger = get_logger(__name__)
 
@@ -331,6 +330,8 @@ async def load_model(
     weight_device: str = os.getenv("TC_DEVICE") or "CPU",
     offline_mode: bool = False
 ) -> tuple[Model, dict, AutoTokenizer, Path]:
+    from tiny_cheetah.repos import RepoCustom
+
     sanitized = model_id.replace("/", "__")
     cache_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
     candidate_path = Path(model_id).expanduser()

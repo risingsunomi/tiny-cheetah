@@ -27,6 +27,7 @@ from tiny_cheetah.models.llm.backend import (
 )
 from tiny_cheetah.orchestration.peer_client import PeerClient
 from tiny_cheetah.tui.chat_menu import GenerationConfigModal
+from tiny_cheetah.tui.help_screen import HelpScreen
 from tiny_cheetah.tui.helpers import (
     MemoryPressureError,
     memory_abort_reason,
@@ -41,7 +42,11 @@ class AgentScreen(Screen[None]):
     """Config-driven CoT agent control screen."""
 
     CSS_PATH = Path(__file__).with_name("agent_screen.tcss")
-    BINDINGS = [("escape", "pop_screen", "Back"), ("b", "pop_screen", "Back")]
+    BINDINGS = [
+        ("escape", "pop_screen", "Back"),
+        ("b", "pop_screen", "Back"),
+        ("h", "open_help", "Help"),
+    ]
 
     def __init__(
         self,
@@ -166,6 +171,9 @@ class AgentScreen(Screen[None]):
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
 
+    def action_open_help(self) -> None:
+        self.app.push_screen(HelpScreen("Agent Help", self._help_text()))
+
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == "agent-open-model-picker":
@@ -197,6 +205,20 @@ class AgentScreen(Screen[None]):
 
     def _open_model_picker(self) -> None:
         self.app.push_screen(ModelPickerScreen(self._model_id or ""), self._handle_model_selected)
+
+    @staticmethod
+    def _help_text() -> str:
+        return "\n".join(
+            [
+                "Agent Screen",
+                "- Start/Stop controls run looping agent execution.",
+                "- Functions opens OpenAI-style tool schema editor.",
+                "- CLI Access runs one-off shell commands.",
+                "- Endless Mode ignores end_run and loops until manual Stop.",
+                "- h opens this help screen.",
+                "- b / Esc returns to previous menu.",
+            ]
+        )
 
     def _handle_model_selected(self, result: Optional[str]) -> None:
         if not result:

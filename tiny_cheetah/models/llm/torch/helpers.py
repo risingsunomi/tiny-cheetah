@@ -15,8 +15,8 @@ from transformers import AutoTokenizer
 
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.models.shard import Shard
-from tiny_cheetah.repos import RepoCustom
 
+from .load_progress import WeightLoadProgress
 from .model import Model
 from .model_config import ModelConfig
 from .quantize import is_quantized_model_config, load_quantized_safetensors
@@ -37,6 +37,14 @@ def _load_weight_tensor(weight_file: Path, model_weight_key: str) -> torch.Tenso
             return None
         return weights.get_tensor(model_weight_key)
 
+
+def _infer_prefix(weight_map: dict[str, str]) -> str:
+    for candidate in ("model", "base_model", "transformer", "gpt_neox", "blk"):
+        prefix = f"{candidate}."
+        if any(key.startswith(prefix) for key in weight_map):
+            return prefix
+    return ""
+
 def apply_weight(
     model_weight_key: str,
     key: str,
@@ -52,9 +60,11 @@ def apply_weight(
     if weight is None:
         return
 
-    if "q_proj" in key:
+    model_type = str(model_config.get("model_type", "")).lower()
+    needs_qk_permute = model_type not in {"gpt_oss"}
+    if needs_qk_permute and "q_proj" in key:
         weight = permute(weight, model_config["num_heads"])
-    elif "k_proj" in key:
+    elif needs_qk_permute and "k_proj" in key:
         weight = permute(weight, model_config["num_kv_heads"])
 
     target = model_state_dict.get(key)
@@ -85,23 +95,27 @@ def load_safetensors(
             safe_index = json.load(handle)
             weight_map = dict(safe_index["weight_map"])
     else:
-        with safetensors.safe_open(str(model_files[0]), framework="numpy") as weight_data:
-            for key in weight_data.keys():
-                weight_map[key] = model_files[0].name
+        # Fallback for repos that only contain shard files without an index json.
+        for model_file in model_files:
+            with safetensors.safe_open(str(model_file), framework="numpy") as weight_data:
+                for key in weight_data.keys():
+                    weight_map[key] = model_file.name
 
     model_state_dict = model.state_dict()
-    first_weight_key = next(iter(weight_map.keys()))
-    prefix_check = first_weight_key.split(".")[0]
-    if prefix_check in {"model", "base_model", "transformer", "gpt_neox", "blk"}:
-        prefix = prefix_check + "."
-    else:
-        prefix = ""
+    prefix = _infer_prefix(weight_map)
+    progress = WeightLoadProgress(total=len(model_state_dict), label="torch-load")
 
-    for key in model_state_dict.keys():
+    for idx, key in enumerate(model_state_dict.keys(), start=1):
         model_weight_key = prefix + key
         if model_weight_key not in weight_map:
             if use_tied and key == "output.weight":
                 embed_weight_key = "model.embed_tokens.weight"
+                progress.update(
+                    idx,
+                    key,
+                    embed_weight_key,
+                    weight_map.get(embed_weight_key),
+                )
                 apply_weight(
                     embed_weight_key,
                     key,
@@ -114,6 +128,12 @@ def load_safetensors(
                 continue
 
             if key == "output.weight" and "lm_head.weight" in weight_map:
+                progress.update(
+                    idx,
+                    key,
+                    "lm_head.weight",
+                    weight_map.get("lm_head.weight"),
+                )
                 apply_weight(
                     "lm_head.weight",
                     key,
@@ -125,6 +145,12 @@ def load_safetensors(
                 )
             continue
 
+        progress.update(
+            idx,
+            key,
+            model_weight_key,
+            weight_map.get(model_weight_key),
+        )
         apply_weight(
             model_weight_key,
             key,
@@ -135,7 +161,12 @@ def load_safetensors(
             model_config,
         )
 
-    model.load_state_dict(model_state_dict, strict=False)
+    incompatible = model.load_state_dict(model_state_dict, strict=False)
+    progress.done()
+    if incompatible.missing_keys:
+        logger.warning("Missing torch checkpoint keys: %s", incompatible.missing_keys)
+    if incompatible.unexpected_keys:
+        logger.warning("Unexpected torch checkpoint keys: %s", incompatible.unexpected_keys)
 
 # Standard openai-style sampling adapted for torch.
 def sample(
@@ -243,68 +274,69 @@ def generate(
             f"attention_mask: {attention_mask.tolist()}"
         )
 
-    logits = model(
-        input_ids,
-        attention_mask=attention_mask,
-        position_ids=position_ids,
-    )
-
-    next_logit = logits[:, -1, :].flatten()
-    tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
-    tok = int(tok_sample.item())
-    out_tokens.append(tok)
-    if on_token is not None:
-        on_token(tok)
-
-    t0 = time.time()
-    generated = 1
-    curr_pos += 1
-    eos_hit = False
-
-    limit = max_new_tokens - 1 if max_new_tokens > 0 else None
-
-    while True:
-        if tok == tokenizer.eos_token_id:
-            elapsed = time.time() - t0
-            tok_s = generated / elapsed if elapsed > 0 else float("inf")
-            print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")
-            eos_hit = True
-            break
-
-        if limit is not None and generated >= limit:
-            break
-
-        generated += 1
-
-        next_tok = torch.tensor([[tok]], device=device, dtype=torch.long)
-        attention_mask = torch.cat(
-            (
-                attention_mask,
-                torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=device),
-            ),
-            dim=1,
-        )
-        position_ids = torch.tensor([curr_pos], device=device, dtype=torch.long)
-
-        if verbose:
-            print(
-                f"next_tok: {[int(next_tok.item())]}\n"
-                f" position_ids: {position_ids.tolist()}\n"
-                f" attention_mask_len: {attention_mask.shape[1]}"
-            )
-
+    with torch.inference_mode():
         logits = model(
-            next_tok,
+            input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
         )
+
         next_logit = logits[:, -1, :].flatten()
         tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
         tok = int(tok_sample.item())
         out_tokens.append(tok)
         if on_token is not None:
             on_token(tok)
+
+        t0 = time.time()
+        generated = 1
         curr_pos += 1
+        eos_hit = False
+
+        limit = max_new_tokens - 1 if max_new_tokens > 0 else None
+
+        while True:
+            if tok == tokenizer.eos_token_id:
+                elapsed = time.time() - t0
+                tok_s = generated / elapsed if elapsed > 0 else float("inf")
+                print(f"[decode] {generated} tokens in {elapsed:.3f}s  ->  {tok_s:.2f} tok/s")
+                eos_hit = True
+                break
+
+            if limit is not None and generated >= limit:
+                break
+
+            generated += 1
+
+            next_tok = torch.tensor([[tok]], device=device, dtype=torch.long)
+            attention_mask = torch.cat(
+                (
+                    attention_mask,
+                    torch.ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype, device=device),
+                ),
+                dim=1,
+            )
+            position_ids = torch.tensor([curr_pos], device=device, dtype=torch.long)
+
+            if verbose:
+                print(
+                    f"next_tok: {[int(next_tok.item())]}\n"
+                    f" position_ids: {position_ids.tolist()}\n"
+                    f" attention_mask_len: {attention_mask.shape[1]}"
+                )
+
+            logits = model(
+                next_tok,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+            next_logit = logits[:, -1, :].flatten()
+            tok_sample = sample(next_logit, temp=temp, k=top_k, p=top_p, af=alpha_f, ap=alpha_p)
+            tok = int(tok_sample.item())
+            out_tokens.append(tok)
+            if on_token is not None:
+                on_token(tok)
+            curr_pos += 1
 
     if not eos_hit:
         elapsed = time.time() - t0
@@ -334,6 +366,8 @@ async def load_model(
     weight_device: str = os.getenv("TC_DEVICE") or "cpu",
     offline_mode: bool = False,
 ) -> tuple[Model, dict, AutoTokenizer, Path]:
+    from tiny_cheetah.repos import RepoCustom
+
     sanitized = model_id.replace("/", "__")
     cache_path = (Path.home() / ".cache" / "tiny_cheetah_models") / sanitized
     candidate_path = Path(model_id).expanduser()
@@ -344,7 +378,7 @@ async def load_model(
     elif cache_path.exists():
         resolved_path = cache_path
 
-    model_repo = RepoCustom(model_id)
+    model_repo = RepoCustom(model_id, backend="torch")
     if resolved_path is not None and any(resolved_path.glob("*.*")):
         model_config = load_model_config(resolved_path)
         model_path = resolved_path

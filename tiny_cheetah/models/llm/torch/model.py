@@ -7,6 +7,37 @@ from torch import nn
 from ...shard import Shard
 from .transformer import TransformerBlock
 
+
+class _FallbackRMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        normed = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return normed * self.weight
+
+
+def _rms_norm(dim: int, eps: float = 1e-6) -> nn.Module:
+    if hasattr(nn, "RMSNorm"):
+        return nn.RMSNorm(dim, eps=eps)
+    return _FallbackRMSNorm(dim, eps=eps)
+
+
+def _resolve_model_dtype(config: dict, device: str) -> torch.dtype:
+    desired = config.get("torch_dtype", torch.float32)
+    if not isinstance(desired, torch.dtype) or not desired.is_floating_point:
+        return torch.float32
+
+    normalized = str(device).strip().lower()
+    if normalized == "mps" and desired == torch.bfloat16:
+        return torch.float16
+    if normalized == "cpu" and desired == torch.float16:
+        return torch.float32
+    return desired
+
+
 class Model(nn.Module):
     def __init__(
         self,
@@ -17,27 +48,36 @@ class Model(nn.Module):
         super().__init__()
         self.config = config
         self.shard = shard
+        self.device_name = os.getenv("TC_DEVICE", "cpu")
+        self.inference_dtype = _resolve_model_dtype(self.config, self.device_name)
 
         print(f"loading shard: {shard}")
 
         self.embed_tokens = nn.Embedding(
             num_embeddings=self.config["vocab_size"],
             embedding_dim=self.config["embed_dim"],
-        ).to(os.getenv("TC_DEVICE", "cpu"))
+            padding_idx=self.config.get("pad_token_id"),
+        )
 
-        self.norm = nn.LayerNorm(
+        self.norm = _rms_norm(
             self.config["embed_dim"],
             eps=self.config["norm_eps"]
-        ).to(os.getenv("TC_DEVICE", "cpu"))
+        )
         self.layers = nn.ModuleList(
-            [TransformerBlock(self.config) for _ in range(self.shard.start_layer, self.shard.end_layer)]
+            [
+                TransformerBlock(self.config, layer_idx=layer_idx)
+                for layer_idx in range(self.shard.start_layer, self.shard.end_layer)
+            ]
         )
 
         # output == lm_head
+        lm_head_bias = bool(self.config.get("lm_head_bias", False))
         self.output = nn.Linear(
             self.config["embed_dim"],
-            self.config["vocab_size"]
-        ).to(os.getenv("TC_DEVICE", "cpu"))
+            self.config["vocab_size"],
+            bias=lm_head_bias,
+        )
+        self.to(device=self.device_name, dtype=self.inference_dtype)
         if use_tied:
             self.output.weight = self.embed_tokens.weight
 

@@ -2,6 +2,7 @@ from .attention import MultiHeadAttention
 from .helpers import generate, load_model, load_model_config, load_safetensors, sample
 from .kv_cache import KVCache
 from .mlp import MLP
+from .moe import MOEExperts, MOEMLP, MOERouter
 from .model import Model
 from .model_config import ModelConfig
 from .quantize import (
@@ -16,6 +17,9 @@ from .transformer import TransformerBlock
 __all__ = [
     "KVCache",
     "MLP",
+    "MOEExperts",
+    "MOEMLP",
+    "MOERouter",
     "Model",
     "ModelConfig",
     "MultiHeadAttention",

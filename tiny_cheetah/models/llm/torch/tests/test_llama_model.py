@@ -30,7 +30,7 @@ DEVICE = os.getenv("TC_DEVICE", "cpu")
 class TestLlamaModel(unittest.TestCase):
     def setUp(self):
         self.test_model = "unsloth/Llama-3.2-1B-Instruct"
-        repo = RepoCustom(self.test_model)
+        repo = RepoCustom(self.test_model, backend="torch")
 
         config_path = repo.base_dir / "config.json"
         weight_files = list(repo.base_dir.glob("*.safetensors"))

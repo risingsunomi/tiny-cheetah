@@ -9,6 +9,7 @@ from textual.containers import Container, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Label, Static
 
+from tiny_cheetah.tui.help_screen import HelpScreen
 from tiny_cheetah.models.llm.backend import (
     LLM_BACKEND_ENV,
     get_llm_backend,
@@ -22,7 +23,11 @@ class SettingsScreen(Screen[None]):
     """Device selection and environment configuration."""
 
     CSS_PATH = Path(__file__).with_name("settings_screen.tcss")
-    BINDINGS = [("escape", "pop_screen", "Back"), ("b", "pop_screen", "Back")]
+    BINDINGS = [
+        ("escape", "pop_screen", "Back"),
+        ("b", "pop_screen", "Back"),
+        ("h", "open_help", "Help"),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -72,6 +77,9 @@ class SettingsScreen(Screen[None]):
 
     def action_pop_screen(self) -> None:
         self.app.pop_screen()
+
+    def action_open_help(self) -> None:
+        self.app.push_screen(HelpScreen("Settings Help", self._help_text()))
 
     def _load_devices(self) -> None:
         container = getattr(self, "_device_container", None)
@@ -185,6 +193,18 @@ class SettingsScreen(Screen[None]):
 
         self._set_status(
             f"Saved TC_DEVICE={os.environ['TC_DEVICE']} and {LLM_BACKEND_ENV}={normalize_llm_backend(backend)}"
+        )
+
+    @staticmethod
+    def _help_text() -> str:
+        return "\n".join(
+            [
+                "Settings Screen",
+                "- Select one device target and one backend.",
+                "- Save writes TC_DEVICE and TC_LLM_BACKEND to environment/.env.",
+                "- h opens this help screen.",
+                "- b / Esc returns to the previous screen.",
+            ]
         )
 
     def _selected_backend(self) -> str:

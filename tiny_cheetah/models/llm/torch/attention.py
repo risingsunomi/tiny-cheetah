@@ -63,9 +63,11 @@ class MultiHeadAttention(nn.Module):
         self,
         config: dict,
         is_causal: Optional[bool] = False,
+        layer_idx: int | None = None,
     ):
         super().__init__()
         self.config = config
+        self.layer_idx = layer_idx
         self.embed_dim = config["embed_dim"]
         self.num_heads = config["num_heads"]
         self.num_kv_heads = config["num_kv_heads"]
@@ -76,6 +78,19 @@ class MultiHeadAttention(nn.Module):
         self.attn_bias = config["attn_bias"]
         self.attn_dropout = config["attn_dropout"]
         self.is_causal = bool(is_causal)
+        self.model_type = str(config.get("model_type", "")).lower()
+        self.use_attention_sinks = self.model_type == "gpt_oss"
+        self.sliding_window: int | None = None
+        if self.model_type == "gpt_oss":
+            layer_types = config.get("layer_types") or []
+            if (
+                isinstance(layer_types, list)
+                and layer_idx is not None
+                and 0 <= layer_idx < len(layer_types)
+                and str(layer_types[layer_idx]) == "sliding_attention"
+            ):
+                sw = int(config.get("sliding_window", 0) or 0)
+                self.sliding_window = sw if sw > 0 else None
 
         if config["rope_scaling"] is not None:
             self.pos_embeddings = RotaryPositionalEmbedding(
@@ -87,12 +102,18 @@ class MultiHeadAttention(nn.Module):
                 low_freq_factor=config["rope_low_freq_factor"],
                 high_freq_factor=config["rope_high_freq_factor"],
                 old_context_len=config["rope_original_max_pos_embeddings"],
+                mode="half" if self.model_type == "gpt_oss" else "interleaved",
+                rope_type=config.get("rope_type", "default"),
+                rope_truncate=bool(config.get("rope_truncate", True)),
             )
         else:
             self.pos_embeddings = RotaryPositionalEmbedding(
                 self.head_dim,
                 self.max_seq_len,
                 config["rope_theta"],
+                mode="half" if self.model_type == "gpt_oss" else "interleaved",
+                rope_type=config.get("rope_type", "default"),
+                rope_truncate=bool(config.get("rope_truncate", True)),
             )
 
         self.k_norm = _rms_norm(self.head_dim) if config["qk_norm"] else None
@@ -118,6 +139,10 @@ class MultiHeadAttention(nn.Module):
             self.embed_dim,
             bias=self.attn_bias,
         )
+        if self.use_attention_sinks:
+            self.sinks = nn.Parameter(torch.zeros(self.num_heads))
+        else:
+            self.register_parameter("sinks", None)
 
     def forward(
         self,
@@ -171,18 +196,64 @@ class MultiHeadAttention(nn.Module):
             k = k.repeat_interleave(q_per_kv, dim=1)
             v = v.repeat_interleave(q_per_kv, dim=1)
 
-        attn_mask = _prepare_attention_mask(attention_mask, q)
-        use_causal = self.is_causal if attn_mask is None else False
+        if self.use_attention_sinks:
+            bsz, heads, q_len, _ = q.shape
+            k_len = k.shape[-2]
 
-        dropout_p = self.attn_dropout if self.training else 0.0
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=dropout_p,
-            is_causal=use_causal,
-        )
+            attn_logits = torch.matmul(q, k.transpose(2, 3)) * (self.head_dim ** -0.5)
+
+            offset = k_len - q_len
+            query_idx = torch.arange(offset, offset + q_len, device=q.device)[:, None]
+            key_idx = torch.arange(k_len, device=q.device)[None, :]
+            causal_mask = key_idx <= query_idx
+
+            if self.sliding_window is not None:
+                lower = query_idx - (self.sliding_window - 1)
+                causal_mask = causal_mask & (key_idx >= lower)
+
+            attn_logits = attn_logits.masked_fill(
+                ~causal_mask.view(1, 1, q_len, k_len),
+                torch.finfo(attn_logits.dtype).min,
+            )
+
+            if attention_mask is not None:
+                if attention_mask.ndim == 1:
+                    key_mask = attention_mask.unsqueeze(0)
+                elif attention_mask.ndim == 2:
+                    key_mask = attention_mask
+                else:
+                    key_mask = None
+                if key_mask is not None:
+                    key_mask = key_mask[:, -k_len:].to(device=q.device) > 0
+                    attn_logits = attn_logits.masked_fill(
+                        ~key_mask[:, None, None, :],
+                        torch.finfo(attn_logits.dtype).min,
+                    )
+                else:
+                    attn_mask = _prepare_attention_mask(attention_mask, q)
+                    if attn_mask is not None:
+                        attn_logits = attn_logits + attn_mask
+
+            sink_logits = self.sinks.reshape(1, -1, 1, 1).to(device=q.device, dtype=attn_logits.dtype)
+            sink_logits = sink_logits.expand(bsz, -1, q_len, -1)
+            combined = torch.cat((attn_logits, sink_logits), dim=-1)
+            combined = combined - combined.max(dim=-1, keepdim=True).values
+            probs = torch.softmax(combined.to(torch.float32), dim=-1).to(dtype=attn_logits.dtype)
+            scores = probs[..., :-1]
+            attn_out = torch.matmul(scores, v)
+        else:
+            attn_mask = _prepare_attention_mask(attention_mask, q)
+            use_causal = self.is_causal if attn_mask is None else False
+
+            dropout_p = self.attn_dropout if self.training else 0.0
+            attn_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+                is_causal=use_causal,
+            )
 
         attn_out = attn_out.transpose(1, 2).reshape(batch_size, seq_len, -1)
         return self.o_proj(attn_out)

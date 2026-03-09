@@ -7,6 +7,7 @@ from torch import nn
 
 from .attention import MultiHeadAttention
 from .mlp import MLP
+from .moe import MOEMLP
 
 
 class _FallbackRMSNorm(nn.Module):
@@ -37,19 +38,23 @@ def _scale_output(scale: Any, value: torch.Tensor) -> torch.Tensor:
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, layer_idx: int | None = None):
         super().__init__()
         norm_eps = config.get("norm_eps", 1e-6)
         self.input_layernorm = _rms_norm(config["embed_dim"], eps=norm_eps)
-        self.mlp = MLP(
-            config.get("embed_dim"),
-            config.get("intermediate_dim"),
-            config.get("hidden_act"),
-            config.get("mlp_bias", True),
-        )
+        if bool(config.get("moe")):
+            self.mlp = MOEMLP(config)
+        else:
+            self.mlp = MLP(
+                config.get("embed_dim"),
+                config.get("intermediate_dim"),
+                config.get("hidden_act"),
+                config.get("mlp_bias", True),
+            )
         self.self_attn = MultiHeadAttention(
             config=config,
             is_causal=any("CausalLM" in arch for arch in config.get("architectures", [])),
+            layer_idx=layer_idx,
         )
         self.post_attention_layernorm = _rms_norm(config.get("embed_dim"), eps=norm_eps)
 
