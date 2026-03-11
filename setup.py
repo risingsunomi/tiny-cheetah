@@ -64,6 +64,7 @@ BASE_REQUIRES = [
     "safetensors",
     "textual",
     "transformers",
+    "jinja2",
     "huggingface-hub",
     "python-dotenv",
     "tokenizers",
@@ -92,6 +93,8 @@ setup(
     packages=find_packages(),
     include_package_data=True,
     package_data={
+        "tiny_cheetah.agent": ["functions.json"],
+        "tiny_cheetah.agent.prompts": ["*.j2"],
         "tiny_cheetah.tui": ["*.tcss"],
         "tiny_cheetah.tui.widget": ["*.tcss"],
     },

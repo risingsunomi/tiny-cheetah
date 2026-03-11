@@ -20,6 +20,7 @@ from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Rich
 
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.agent.functions import AgentFunctions
+from tiny_cheetah.agent.prompt_loader import render_agent_system_prompt
 from tiny_cheetah.models.llm.backend import (
     detect_quantization_mode,
     get_backend_device,
@@ -412,27 +413,18 @@ class AgentScreen(Screen[None]):
 
     def _build_initial_messages(self, *, name: str, instructions: str) -> list[dict[str, str]]:
         enabled_functions = sorted(self._enabled_function_names())
-        tool_payload = json.dumps(self._agent_functions, ensure_ascii=True)
-        end_behavior = (
-            "Endless mode is enabled: continue running until user presses Stop; ignore end_run."
-            if self._endless_mode
-            else "When the task is complete, call end_run with an optional summary."
+        system_prompt = render_agent_system_prompt(
+            name=name,
+            agent_prompt=instructions,
+            endless_mode=self._endless_mode,
+            enabled_functions=enabled_functions,
+            function_format=self._function_format,
+            tool_summary=self._tool_prompt_summary(),
         )
-        system_prompt = (
-            f"You are '{name}', an autonomous reasoning agent.\n"
-            "You can either think and answer directly, or request a function call.\n"
-            "If you need a function call, output JSON only in one of these forms:\n"
-            '1) {"function_call":{"name":"...","arguments":{...}}}\n'
-            '2) {"tool_calls":[{"function":{"name":"...","arguments":{...}}}]}\n'
-            '3) {"name":"...","arguments":{...}}\n'
-            f"{end_behavior}\n"
-            f"Enabled function names: {', '.join(enabled_functions) if enabled_functions else '(none)'}\n"
-            f"Function schema payload ({self._function_format} format): {tool_payload}\n"
-            "Keep function arguments strictly valid JSON."
-        )
+
+        self._log(f"Initial system prompt:\n{system_prompt}")
         return [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": instructions},
         ]
 
     async def _agent_loop(self) -> str:
@@ -480,31 +472,31 @@ class AgentScreen(Screen[None]):
 
                 recovery_attempts = 0
                 final_reply = reply
-                self._agent_messages.append({"role": "assistant", "content": reply})
                 self._log(f"[agent][step {step}] {reply}")
 
-                function_call = self._extract_function_call(reply)
+                payload = self._extract_agent_payload(reply)
+                function_call = self._extract_function_call_from_payload(payload)
                 if function_call is None:
                     self._log(f"[agent][step {step}] No function call found; continuing loop.")
-                    if reply.lstrip().upper().startswith("FINAL:"):
-                        nudge = (
-                            "You returned FINAL text. To stop this run, call end_run "
-                            "with optional {'summary': '...'} arguments."
-                        )
-                    else:
-                        nudge = (
-                            "Continue the task. Use function-call JSON when needed. "
-                            "When finished, call end_run."
-                        )
+                    compact_reply = self._compact_agent_reply_for_memory(payload)
+                    if compact_reply is not None:
+                        self._agent_messages.append(compact_reply)
+                    nudge = (
+                        "Return one JSON object with thoughts and ability. "
+                        "Use ability.name and ability.args. "
+                        "If the task is complete, use end_run."
+                    )
                     self._agent_messages.append({"role": "user", "content": nudge})
                     await asyncio.sleep(0)
                     continue
 
                 function_name, arguments = function_call
+                compact_reply = self._compact_agent_reply_for_memory(payload, function_name=function_name, arguments=arguments)
+                if compact_reply is not None:
+                    self._agent_messages.append(compact_reply)
                 call_json = json.dumps(
                     {"name": function_name, "arguments": arguments},
                     ensure_ascii=True,
-                    indent=2,
                 )
                 self._log(f"[function.call]\n{call_json}")
                 if function_name not in self._enabled_function_names():
@@ -520,8 +512,8 @@ class AgentScreen(Screen[None]):
                         arguments,
                     )
 
-                result_json = json.dumps(result, ensure_ascii=True, indent=2)
-                self._log(f"[function.result]\n{result_json}")
+                result_summary = self._summarize_function_result(function_name, arguments, result)
+                self._log(f"[function.result] {result_summary}")
 
                 is_end_run = function_name == "end_run" and bool(result.get("ok")) and bool(result.get("end_run"))
                 if is_end_run and not self._endless_mode:
@@ -534,8 +526,8 @@ class AgentScreen(Screen[None]):
                     {
                         "role": "user",
                         "content": (
-                            f"Function result for {function_name}: {result_json}\n"
-                            "Continue."
+                            f"Function result: {result_summary}\n"
+                            "Choose the next ability, or use end_run if the task is complete."
                         ),
                     }
                 )
@@ -572,6 +564,19 @@ class AgentScreen(Screen[None]):
         if not names:
             names = set(self._agent_runtime.list_builtin_functions())
         return names
+
+    def _tool_prompt_summary(self) -> str:
+        lines: list[str] = []
+        for spec in self._agent_runtime.get_function_specs():
+            properties = spec.parameters.get("properties", {})
+            required = set(spec.parameters.get("required", []))
+            arg_parts: list[str] = []
+            for arg_name in properties.keys():
+                suffix = "*" if arg_name in required else "?"
+                arg_parts.append(f"{arg_name}{suffix}")
+            signature = f"{spec.name}({', '.join(arg_parts)})" if arg_parts else f"{spec.name}()"
+            lines.append(f"- {signature}: {spec.description}")
+        return "\n".join(lines) if lines else "- none"
 
     def _context_window_tokens(self) -> int:
         config = self._model_config if isinstance(self._model_config, dict) else {}
@@ -750,7 +755,7 @@ class AgentScreen(Screen[None]):
         ]
         return len(trimmed)
 
-    def _extract_function_call(self, text: str) -> tuple[str, dict[str, Any] | str] | None:
+    def _extract_agent_payload(self, text: str) -> dict[str, Any] | None:
         for candidate in self._json_candidates(text):
             try:
                 payload = json.loads(candidate)
@@ -758,32 +763,146 @@ class AgentScreen(Screen[None]):
                 continue
             if not isinstance(payload, dict):
                 continue
-
-            name = None
-            arguments: dict[str, Any] | str = {}
-
-            function_call = payload.get("function_call")
-            if isinstance(function_call, dict):
-                name = function_call.get("name")
-                arguments = function_call.get("arguments", {})
-
-            if name is None:
-                tool_calls = payload.get("tool_calls")
-                if isinstance(tool_calls, list) and tool_calls:
-                    first = tool_calls[0]
-                    if isinstance(first, dict):
-                        fn = first.get("function", {})
-                        if isinstance(fn, dict):
-                            name = fn.get("name")
-                            arguments = fn.get("arguments", {})
-
-            if name is None and isinstance(payload.get("name"), str):
-                name = payload.get("name")
-                arguments = payload.get("arguments", {})
-
-            if isinstance(name, str) and name.strip():
-                return name.strip(), arguments
+            return payload
         return None
+
+    def _extract_function_call(self, text: str) -> tuple[str, dict[str, Any] | str] | None:
+        return self._extract_function_call_from_payload(self._extract_agent_payload(text))
+
+    def _extract_function_call_from_payload(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any] | str] | None:
+        if not isinstance(payload, dict):
+            return None
+
+        name = None
+        arguments: dict[str, Any] | str = {}
+
+        ability = payload.get("ability")
+        if isinstance(ability, dict):
+            name = ability.get("name")
+            arguments = ability.get("args", {})
+
+        function_call = payload.get("function_call")
+        if name is None and isinstance(function_call, dict):
+            name = function_call.get("name")
+            arguments = function_call.get("arguments", {})
+
+        if name is None:
+            tool_calls = payload.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                first = tool_calls[0]
+                if isinstance(first, dict):
+                    fn = first.get("function", {})
+                    if isinstance(fn, dict):
+                        name = fn.get("name")
+                        arguments = fn.get("arguments", {})
+
+        if name is None and isinstance(payload.get("name"), str):
+            name = payload.get("name")
+            arguments = payload.get("arguments", {})
+
+        if isinstance(name, str) and name.strip():
+            return name.strip(), arguments
+        return None
+
+    def _compact_agent_reply_for_memory(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        function_name: str | None = None,
+        arguments: dict[str, Any] | str | None = None,
+    ) -> dict[str, str] | None:
+        if not isinstance(payload, dict):
+            return None
+
+        thoughts = payload.get("thoughts")
+        speak = ""
+        step_completed = ""
+        if isinstance(thoughts, dict):
+            speak = self._truncate_text(str(thoughts.get("speak", "")).strip(), 120)
+            step_completed = self._truncate_text(str(thoughts.get("step completed", "")).strip(), 120)
+
+        parts: list[str] = []
+        if function_name:
+            parts.append(f"ability={function_name}")
+        if arguments not in (None, {}, ""):
+            parts.append(f"args={self._compact_json_text(arguments, limit=180)}")
+        if speak:
+            parts.append(f"speak={speak}")
+        elif step_completed:
+            parts.append(f"step={step_completed}")
+
+        if not parts:
+            return None
+        return {"role": "assistant", "content": " | ".join(parts)}
+
+    def _summarize_function_result(
+        self,
+        function_name: str,
+        arguments: dict[str, Any] | str,
+        result: dict[str, Any],
+    ) -> str:
+        if not bool(result.get("ok")):
+            return self._truncate_text(f"{function_name} failed: {result.get('error', 'unknown error')}", 220)
+
+        if function_name == "write_file":
+            return self._truncate_text(
+                f"write_file ok path={result.get('path')} chars={result.get('chars_written')} "
+                f"created={result.get('created')} overwritten={result.get('overwritten')}",
+                220,
+            )
+        if function_name == "edit_file":
+            return self._truncate_text(
+                f"edit_file ok path={result.get('path')} replacements={result.get('replacements')}",
+                220,
+            )
+        if function_name == "read_file":
+            content = self._truncate_text(str(result.get("content", "")).replace("\n", "\\n"), 120)
+            return self._truncate_text(
+                f"read_file ok path={result.get('path')} truncated={result.get('truncated')} content={content}",
+                220,
+            )
+        if function_name == "list_dir":
+            entries = result.get("entries")
+            count = len(entries) if isinstance(entries, list) else 0
+            return self._truncate_text(f"list_dir ok path={result.get('path')} entries={count}", 220)
+        if function_name == "run_shell":
+            stdout = self._truncate_text(str(result.get("stdout", "")).replace("\n", "\\n"), 80)
+            stderr = self._truncate_text(str(result.get("stderr", "")).replace("\n", "\\n"), 80)
+            return self._truncate_text(
+                f"run_shell ok returncode={result.get('returncode')} stdout={stdout} stderr={stderr}",
+                220,
+            )
+        if function_name == "get_env":
+            return self._truncate_text(f"get_env ok name={result.get('name')} value={result.get('value')}", 220)
+        if function_name == "web_search":
+            return self._truncate_text(
+                f"web_search ok query={result.get('query')} count={result.get('count')}",
+                220,
+            )
+        if function_name == "end_run":
+            return self._truncate_text(f"end_run ok summary={result.get('summary', '')}", 220)
+        return self._truncate_text(
+            f"{function_name} ok result={self._compact_json_text(result, limit=180)}",
+            220,
+        )
+
+    @staticmethod
+    def _compact_json_text(value: Any, *, limit: int = 180) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            text = str(value)
+        return AgentScreen._truncate_text(text, limit)
+
+    @staticmethod
+    def _truncate_text(value: str, limit: int) -> str:
+        text = " ".join(str(value).split())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
 
     @staticmethod
     def _json_candidates(text: str) -> list[str]:

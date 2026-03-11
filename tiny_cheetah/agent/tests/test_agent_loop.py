@@ -20,9 +20,17 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
                 [
                     json.dumps(
                         {
-                            "function_call": {
+                            "thoughts": {
+                                "text": "Need to write the requested file",
+                                "reasoning": "The task is a file creation task",
+                                "criticism": "Need to stop after writing",
+                                "step completed": "Chose the next action",
+                                "plan": "- write file\n- end run",
+                                "speak": "Writing the file now",
+                            },
+                            "ability": {
                                 "name": "write_file",
-                                "arguments": {
+                                "args": {
                                     "path": str(target_path),
                                     "content": "Washington, D.C. is the capital of the USA.\n",
                                     "make_dirs": True,
@@ -32,9 +40,17 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
                     ),
                     json.dumps(
                         {
-                            "function_call": {
+                            "thoughts": {
+                                "text": "The file has been written",
+                                "reasoning": "The task is complete",
+                                "criticism": "None",
+                                "step completed": "Finished the requested file write",
+                                "plan": "- end run",
+                                "speak": "Done",
+                            },
+                            "ability": {
                                 "name": "end_run",
-                                "arguments": {"summary": "File written."},
+                                "args": {"summary": "File written."},
                             }
                         }
                     ),
@@ -62,7 +78,13 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             self.assertIn('"name": "end_run"', final_reply)
             self.assertTrue(
                 any(
-                    message["role"] == "user" and message["content"].startswith("Function result for write_file:")
+                    message["role"] == "user" and message["content"].startswith("Function result: write_file ok")
+                    for message in screen._agent_messages
+                )
+            )
+            self.assertTrue(
+                any(
+                    message["role"] == "assistant" and "ability=write_file" in message["content"]
                     for message in screen._agent_messages
                 )
             )
@@ -94,9 +116,17 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
                 raise MemoryPressureError("Memory guard triggered (agent loop)")
             return json.dumps(
                 {
-                    "function_call": {
+                    "thoughts": {
+                        "text": "Recovered and ready to finish",
+                        "reasoning": "No more actions are needed",
+                        "criticism": "None",
+                        "step completed": "Recovered from memory pressure",
+                        "plan": "- end run",
+                        "speak": "Done",
+                    },
+                    "ability": {
                         "name": "end_run",
-                        "arguments": {"summary": "Recovered and finished."},
+                        "args": {"summary": "Recovered and finished."},
                     }
                 }
             )

@@ -54,37 +54,23 @@ def memory_abort_reason(context: str = "") -> str | None:
 
     Tunables:
     - TC_MEM_MAX_PERCENT (default 92)
-    - TC_SWAP_MAX_PERCENT (default 90)
-    - TC_SWAP_ONLY_ABORT_PERCENT (default 99)
     - TC_MEM_MIN_AVAILABLE_GB (default 0.75)
     """
     if psutil is None:
         return None
 
     mem = psutil.virtual_memory()
-    swap = psutil.swap_memory()
     max_mem_percent = _env_float("TC_MEM_MAX_PERCENT", 92.0)
-    max_swap_percent = _env_float("TC_SWAP_MAX_PERCENT", 90.0)
-    swap_only_abort_percent = _env_float("TC_SWAP_ONLY_ABORT_PERCENT", 99.0)
     min_available_gb = _env_float("TC_MEM_MIN_AVAILABLE_GB", 0.75)
     available_gb = _bytes_to_gib(float(mem.available))
     ram_high = float(mem.percent) >= max_mem_percent
-    swap_high = float(swap.percent) >= max_swap_percent
     available_low = available_gb <= min_available_gb
-    swap_critical = float(swap.percent) >= swap_only_abort_percent
 
     reasons: list[str] = []
     if ram_high:
         reasons.append(f"RAM usage {float(mem.percent):.1f}% >= {max_mem_percent:.1f}%")
     if available_low:
         reasons.append(f"Available RAM {available_gb:.2f} GiB <= {min_available_gb:.2f} GiB")
-    if swap_high and (ram_high or available_low):
-        reasons.append(f"Swap usage {float(swap.percent):.1f}% >= {max_swap_percent:.1f}%")
-    elif swap_critical:
-        reasons.append(
-            f"Swap usage {float(swap.percent):.1f}% >= {swap_only_abort_percent:.1f}% "
-            "(critical swap-only threshold)"
-        )
 
     if not reasons:
         return None
@@ -92,8 +78,7 @@ def memory_abort_reason(context: str = "") -> str | None:
     label = f" ({context})" if context else ""
     return (
         f"Memory guard triggered{label}: {'; '.join(reasons)} "
-        f"[RAM {float(mem.percent):.1f}% used, swap {float(swap.percent):.1f}% used, "
-        f"available {available_gb:.2f} GiB]"
+        f"[RAM {float(mem.percent):.1f}% used, available {available_gb:.2f} GiB]"
     )
 
 

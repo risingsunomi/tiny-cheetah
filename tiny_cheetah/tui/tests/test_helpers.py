@@ -31,8 +31,6 @@ class TestMemoryAbortReason(unittest.TestCase):
             os.environ,
             {
                 "TC_MEM_MAX_PERCENT": "92",
-                "TC_SWAP_MAX_PERCENT": "90",
-                "TC_SWAP_ONLY_ABORT_PERCENT": "99",
                 "TC_MEM_MIN_AVAILABLE_GB": "0.75",
             },
             clear=False,
@@ -40,14 +38,12 @@ class TestMemoryAbortReason(unittest.TestCase):
             with patch.object(helpers, "psutil", fake_psutil):
                 self.assertIsNone(helpers.memory_abort_reason("agent loop"))
 
-    def test_swap_and_low_available_abort(self) -> None:
+    def test_low_available_ram_aborts(self) -> None:
         fake_psutil = _FakePsutil(ram_percent=79.0, available_gb=0.5, swap_percent=93.3)
         with patch.dict(
             os.environ,
             {
                 "TC_MEM_MAX_PERCENT": "92",
-                "TC_SWAP_MAX_PERCENT": "90",
-                "TC_SWAP_ONLY_ABORT_PERCENT": "99",
                 "TC_MEM_MIN_AVAILABLE_GB": "0.75",
             },
             clear=False,
@@ -56,17 +52,15 @@ class TestMemoryAbortReason(unittest.TestCase):
                 reason = helpers.memory_abort_reason("agent loop")
         self.assertIsNotNone(reason)
         assert reason is not None
-        self.assertIn("Swap usage 93.3% >= 90.0%", reason)
         self.assertIn("Available RAM 0.50 GiB <= 0.75 GiB", reason)
+        self.assertNotIn("Swap usage", reason)
 
-    def test_critical_swap_alone_can_still_abort(self) -> None:
-        fake_psutil = _FakePsutil(ram_percent=79.0, available_gb=5.03, swap_percent=99.2)
+    def test_high_ram_percent_aborts(self) -> None:
+        fake_psutil = _FakePsutil(ram_percent=94.0, available_gb=5.03, swap_percent=99.2)
         with patch.dict(
             os.environ,
             {
                 "TC_MEM_MAX_PERCENT": "92",
-                "TC_SWAP_MAX_PERCENT": "90",
-                "TC_SWAP_ONLY_ABORT_PERCENT": "99",
                 "TC_MEM_MIN_AVAILABLE_GB": "0.75",
             },
             clear=False,
@@ -75,7 +69,8 @@ class TestMemoryAbortReason(unittest.TestCase):
                 reason = helpers.memory_abort_reason("agent loop")
         self.assertIsNotNone(reason)
         assert reason is not None
-        self.assertIn("critical swap-only threshold", reason)
+        self.assertIn("RAM usage 94.0% >= 92.0%", reason)
+        self.assertNotIn("Swap usage", reason)
 
 
 if __name__ == "__main__":
