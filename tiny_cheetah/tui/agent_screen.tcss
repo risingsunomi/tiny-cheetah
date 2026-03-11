@@ -55,8 +55,7 @@
     margin-bottom: 0;
 }
 
-.agent-field-label,
-.agent-functions-label {
+.agent-field-label {
     margin-top: 0;
 }
 
@@ -83,8 +82,17 @@
     margin-right: 1;
 }
 
-#agent-open-functions {
+#agent-open-config {
     margin-right: 1;
+}
+
+#agent-config-summary {
+    border: solid $accent;
+    background: #050505;
+    color: $text;
+    padding: 0 1;
+    margin-top: 0;
+    min-height: 5;
 }
 
 #agent-open-model-picker,
@@ -98,57 +106,56 @@
     color: $text;
     padding: 0 1;
     margin-top: 0;
-    height: 8;
-    overflow-y: auto;
+    min-height: 8;
+    height: auto;
 }
 
 ModalScreen#agent-cli-modal,
-ModalScreen#agent-functions-modal {
+ModalScreen#agent-config-modal {
     align: center middle;
 }
 
 #agent-cli-modal-container,
-#agent-functions-modal-container {
+#agent-config-modal-container {
     background: $surface;
     border: round $primary;
-    width: 70%;
-    max-width: 100;
+    width: 80%;
+    max-width: 120;
     padding: 1 2;
     layout: vertical;
 }
 
-#agent-cli-title,
-#agent-functions-title {
+#agent-config-title {
     text-align: center;
     text-style: bold;
     margin-bottom: 1;
 }
 
-#agent-cli-buttons,
-#agent-functions-mode-buttons,
-#agent-functions-buttons {
+#agent-config-buttons {
     layout: horizontal;
     align: right middle;
     margin-top: 1;
 }
 
-#agent-cli-buttons Button,
-#agent-functions-mode-buttons Button,
-#agent-functions-buttons Button {
+#agent-config-buttons Button {
     margin-left: 1;
 }
 
-#agent-functions-status {
+#agent-config-status {
     color: $warning;
     margin-top: 1;
 }
 
-#agent-functions-preview {
+#agent-config-instructions {
     border: solid $accent;
     background: #050505;
     color: $text;
     padding: 1;
-    height: 12;
-    overflow-y: auto;
+    height: 16;
     margin-top: 1;
+}
+
+#agent-state-value,
+#agent-functions-value {
+    text-style: italic;
 }

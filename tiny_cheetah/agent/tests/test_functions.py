@@ -16,6 +16,8 @@ class TestAgentFunctions(unittest.TestCase):
         names = set(self.runtime.list_builtin_functions())
         self.assertIn("list_dir", names)
         self.assertIn("read_file", names)
+        self.assertIn("write_file", names)
+        self.assertIn("edit_file", names)
         self.assertIn("run_shell", names)
         self.assertIn("get_env", names)
         self.assertIn("end_run", names)
@@ -76,6 +78,41 @@ class TestAgentFunctions(unittest.TestCase):
             result = self.runtime.execute_agent_function("get_env", {"name": "TC_AGENT_TEST_ENV"})
             self.assertTrue(result.get("ok"))
             self.assertEqual(result.get("value"), "hello")
+
+    def test_execute_write_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "nested", "sample.txt")
+            result = self.runtime.execute_agent_function(
+                "write_file",
+                {
+                    "path": file_path,
+                    "content": "hello world",
+                    "make_dirs": True,
+                },
+            )
+            self.assertTrue(result.get("ok"))
+            with open(file_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "hello world")
+
+    def test_execute_edit_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "sample.txt")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("alpha beta alpha")
+
+            result = self.runtime.execute_agent_function(
+                "edit_file",
+                {
+                    "path": file_path,
+                    "old_text": "alpha",
+                    "new_text": "omega",
+                    "replace_all": True,
+                },
+            )
+            self.assertTrue(result.get("ok"))
+            self.assertEqual(result.get("replacements"), 2)
+            with open(file_path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "omega beta omega")
 
     def test_execute_run_shell(self) -> None:
         result = self.runtime.execute_agent_function("run_shell", {"command": "echo hello"})

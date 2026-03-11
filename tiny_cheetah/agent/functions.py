@@ -10,92 +10,60 @@ from urllib.parse import quote_plus
 from tiny_cheetah.agent.model import AgentFunctionSpec
 
 
+FUNCTION_SPECS_PATH = Path(__file__).with_name("functions.json")
+
+
 class AgentFunctions:
     def __init__(self) -> None:
-        self._functions: dict[str, AgentFunctionSpec] = {
-            "list_dir": AgentFunctionSpec(
-                name="list_dir",
-                description="List directory entries for a path.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Directory path"},
-                    },
-                    "required": [],
-                },
-                handler=self._fn_list_dir,
-            ),
-            "read_file": AgentFunctionSpec(
-                name="read_file",
-                description="Read UTF-8 text from a file.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path"},
-                        "max_chars": {"type": "integer", "description": "Maximum number of characters to return"},
-                    },
-                    "required": ["path"],
-                },
-                handler=self._fn_read_file,
-            ),
-            "run_shell": AgentFunctionSpec(
-                name="run_shell",
-                description="Run a local shell command and return stdout/stderr/exit code.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "Shell command to execute"},
-                        "timeout_seconds": {"type": "integer", "description": "Command timeout in seconds"},
-                    },
-                    "required": ["command"],
-                },
-                handler=self._fn_run_shell,
-            ),
-            "get_env": AgentFunctionSpec(
-                name="get_env",
-                description="Read one environment variable.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Environment variable name"},
-                    },
-                    "required": ["name"],
-                },
-                handler=self._fn_get_env,
-            ),
-            "end_run": AgentFunctionSpec(
-                name="end_run",
-                description="Signal that the current agent loop should stop.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "summary": {
-                            "type": "string",
-                            "description": "Optional short summary for why the run is ending",
-                        },
-                    },
-                    "required": [],
-                },
-                handler=self._fn_end_run,
-            ),
-            "web_search": AgentFunctionSpec(
-                name="web_search",
-                description="Search the web using Bing and return top results.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "max_results": {"type": "integer", "description": "Maximum number of results (1-10)"},
-                        "timeout_seconds": {"type": "integer", "description": "Page load timeout in seconds"},
-                    },
-                    "required": ["query"],
-                },
-                handler=self._fn_web_search,
-            ),
+        self._handlers = {
+            "list_dir": self._fn_list_dir,
+            "read_file": self._fn_read_file,
+            "write_file": self._fn_write_file,
+            "edit_file": self._fn_edit_file,
+            "run_shell": self._fn_run_shell,
+            "get_env": self._fn_get_env,
+            "end_run": self._fn_end_run,
+            "web_search": self._fn_web_search,
         }
+        self._functions = self._load_function_specs()
+
+    def _load_function_specs(self) -> dict[str, AgentFunctionSpec]:
+        payload = json.loads(FUNCTION_SPECS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Invalid agent function spec file: {FUNCTION_SPECS_PATH}")
+
+        specs: dict[str, AgentFunctionSpec] = {}
+        for entry in payload:
+            if not isinstance(entry, dict):
+                raise RuntimeError("Agent function specs must be JSON objects")
+
+            name = str(entry.get("name", "")).strip()
+            description = str(entry.get("description", "")).strip()
+            parameters = entry.get("parameters")
+            if not name or not description or not isinstance(parameters, dict):
+                raise RuntimeError(f"Invalid agent function spec entry: {entry!r}")
+
+            handler = self._handlers.get(name)
+            if handler is None:
+                raise RuntimeError(f"Missing handler for agent function '{name}'")
+
+            specs[name] = AgentFunctionSpec(
+                name=name,
+                description=description,
+                parameters=parameters,
+                handler=handler,
+            )
+        return specs
+
+    @staticmethod
+    def _resolve_path(path: str) -> Path:
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            target = Path.cwd() / target
+        return target.resolve()
 
     def _fn_list_dir(self, path: str = ".") -> dict[str, Any]:
-        base = Path(path).expanduser().resolve()
+        base = self._resolve_path(path)
         if not base.exists():
             return {"ok": False, "error": f"Path not found: {base}"}
         if not base.is_dir():
@@ -104,7 +72,7 @@ class AgentFunctions:
         return {"ok": True, "path": str(base), "entries": items}
 
     def _fn_read_file(self, path: str, max_chars: int = 4000) -> dict[str, Any]:
-        target = Path(path).expanduser().resolve()
+        target = self._resolve_path(path)
         if not target.exists():
             return {"ok": False, "error": f"File not found: {target}"}
         if not target.is_file():
@@ -119,6 +87,69 @@ class AgentFunctions:
             "path": str(target),
             "content": clipped,
             "truncated": len(data) > len(clipped),
+        }
+
+    def _fn_write_file(
+        self,
+        path: str,
+        content: str,
+        overwrite: bool = False,
+        make_dirs: bool = True,
+    ) -> dict[str, Any]:
+        target = self._resolve_path(path)
+        existed = target.exists()
+        if existed and target.is_dir():
+            return {"ok": False, "error": f"Cannot write to directory: {target}"}
+        if existed and not overwrite:
+            return {"ok": False, "error": f"File already exists: {target}"}
+        try:
+            if make_dirs:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(content), encoding="utf-8")
+        except Exception as exc:
+            return {"ok": False, "error": f"Write failed: {exc}"}
+        return {
+            "ok": True,
+            "path": str(target),
+            "created": not existed,
+            "overwritten": existed,
+            "chars_written": len(str(content)),
+        }
+
+    def _fn_edit_file(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+        replace_all: bool = False,
+    ) -> dict[str, Any]:
+        target = self._resolve_path(path)
+        if not target.exists():
+            return {"ok": False, "error": f"File not found: {target}"}
+        if not target.is_file():
+            return {"ok": False, "error": f"Not a file: {target}"}
+        if not old_text:
+            return {"ok": False, "error": "old_text is required"}
+        try:
+            data = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            return {"ok": False, "error": f"Read failed: {exc}"}
+
+        matches = data.count(old_text)
+        if matches == 0:
+            return {"ok": False, "error": f"old_text not found in file: {target}"}
+
+        replacements = matches if replace_all else 1
+        updated = data.replace(old_text, new_text, replacements)
+        try:
+            target.write_text(updated, encoding="utf-8")
+        except Exception as exc:
+            return {"ok": False, "error": f"Write failed: {exc}"}
+
+        return {
+            "ok": True,
+            "path": str(target),
+            "replacements": replacements,
         }
 
     def _fn_run_shell(self, command: str, timeout_seconds: int = 20) -> dict[str, Any]:
@@ -234,6 +265,9 @@ class AgentFunctions:
 
     def list_builtin_functions(self) -> list[str]:
         return sorted(self._functions.keys())
+
+    def get_function_specs(self) -> list[AgentFunctionSpec]:
+        return list(self._functions.values())
 
     def get_agent_functions(self, format_mode: str = "tools") -> list[dict[str, Any]]:
         mode = str(format_mode).strip().lower()

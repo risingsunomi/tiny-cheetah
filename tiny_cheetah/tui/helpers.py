@@ -1,4 +1,5 @@
 from __future__ import annotations
+import gc
 import os
 import time
 from typing import Any, Callable
@@ -54,6 +55,7 @@ def memory_abort_reason(context: str = "") -> str | None:
     Tunables:
     - TC_MEM_MAX_PERCENT (default 92)
     - TC_SWAP_MAX_PERCENT (default 90)
+    - TC_SWAP_ONLY_ABORT_PERCENT (default 99)
     - TC_MEM_MIN_AVAILABLE_GB (default 0.75)
     """
     if psutil is None:
@@ -63,16 +65,26 @@ def memory_abort_reason(context: str = "") -> str | None:
     swap = psutil.swap_memory()
     max_mem_percent = _env_float("TC_MEM_MAX_PERCENT", 92.0)
     max_swap_percent = _env_float("TC_SWAP_MAX_PERCENT", 90.0)
+    swap_only_abort_percent = _env_float("TC_SWAP_ONLY_ABORT_PERCENT", 99.0)
     min_available_gb = _env_float("TC_MEM_MIN_AVAILABLE_GB", 0.75)
     available_gb = _bytes_to_gib(float(mem.available))
+    ram_high = float(mem.percent) >= max_mem_percent
+    swap_high = float(swap.percent) >= max_swap_percent
+    available_low = available_gb <= min_available_gb
+    swap_critical = float(swap.percent) >= swap_only_abort_percent
 
     reasons: list[str] = []
-    if float(mem.percent) >= max_mem_percent:
+    if ram_high:
         reasons.append(f"RAM usage {float(mem.percent):.1f}% >= {max_mem_percent:.1f}%")
-    if float(swap.percent) >= max_swap_percent:
-        reasons.append(f"Swap usage {float(swap.percent):.1f}% >= {max_swap_percent:.1f}%")
-    if available_gb <= min_available_gb:
+    if available_low:
         reasons.append(f"Available RAM {available_gb:.2f} GiB <= {min_available_gb:.2f} GiB")
+    if swap_high and (ram_high or available_low):
+        reasons.append(f"Swap usage {float(swap.percent):.1f}% >= {max_swap_percent:.1f}%")
+    elif swap_critical:
+        reasons.append(
+            f"Swap usage {float(swap.percent):.1f}% >= {swap_only_abort_percent:.1f}% "
+            "(critical swap-only threshold)"
+        )
 
     if not reasons:
         return None
@@ -83,6 +95,40 @@ def memory_abort_reason(context: str = "") -> str | None:
         f"[RAM {float(mem.percent):.1f}% used, swap {float(swap.percent):.1f}% used, "
         f"available {available_gb:.2f} GiB]"
     )
+
+
+def relieve_memory_pressure(model: Any | None = None) -> None:
+    """Best-effort cache cleanup before giving up on a long-running generation loop."""
+    if model is not None and hasattr(model, "reset_kv_cache"):
+        try:
+            model.reset_kv_cache()
+        except Exception:
+            logger.debug("Failed to reset KV cache during memory relief", exc_info=True)
+
+    if torch is not None:
+        try:
+            if hasattr(torch, "cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            logger.debug("Failed to empty torch CUDA cache", exc_info=True)
+        try:
+            mps = getattr(torch, "mps", None)
+            if mps is not None and hasattr(mps, "empty_cache"):
+                mps.empty_cache()
+        except Exception:
+            logger.debug("Failed to empty torch MPS cache", exc_info=True)
+
+    try:
+        device_manager = getattr(tg, "Device", None)
+        opened_devices = list(getattr(device_manager, "_opened_devices", [])) if device_manager is not None else []
+        for device_name in opened_devices:
+            allocator = getattr(device_manager[device_name], "allocator", None)
+            if allocator is not None and hasattr(allocator, "free_cache"):
+                allocator.free_cache()
+    except Exception:
+        logger.debug("Failed to clear tinygrad allocator caches", exc_info=True)
+
+    gc.collect()
 
 
 def _raise_if_abort(abort_check: AbortCheck | None) -> None:
@@ -119,7 +165,7 @@ def streaming_generate(
     tokenizer: AutoTokenizer,
     max_new_tokens: int = 512,
     temp: float = 1.0,
-    top_k: int = 0,
+    top_k: int = 35,
     top_p: float = 0.8,
     alpha_f: float = 0.0,
     alpha_p: float = 0.0,

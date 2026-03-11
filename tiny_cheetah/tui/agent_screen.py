@@ -16,7 +16,7 @@ from textual.app import ComposeResult
 from textual.containers import Container, VerticalScroll
 from textual.events import Mount
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Static, TextArea
 
 from tiny_cheetah.logging_utils import get_logger
 from tiny_cheetah.agent.functions import AgentFunctions
@@ -32,6 +32,7 @@ from tiny_cheetah.tui.help_screen import HelpScreen
 from tiny_cheetah.tui.helpers import (
     MemoryPressureError,
     memory_abort_reason,
+    relieve_memory_pressure,
     streaming_generate_with_peers,
 )
 from tiny_cheetah.tui.widget.model_picker_screen import ModelPickerScreen
@@ -73,21 +74,22 @@ class AgentScreen(Screen[None]):
         self._agent_messages: list[dict[str, str]] = []
         self._agent_task: Optional[asyncio.Task[str]] = None
         self._agent_runtime = AgentFunctions()
+        self._agent_functions = self._agent_runtime.get_agent_functions(format_mode=self._function_format)
+        self._agent_name: str = (os.getenv("TC_AGENT_NAME") or "cot-agent").strip() or "cot-agent"
+        self._agent_instructions: str = (os.getenv("TC_AGENT_INSTRUCTIONS") or "").strip()
         self._endless_mode: bool = self._env_flag("TC_AGENT_ENDLESS_MODE", False)
         self._last_agent_response: str = ""
 
         self._model_label: Optional[Label] = None
         self._backend_label: Optional[Label] = None
         self._state_label: Optional[Label] = None
+        self._config_summary: Optional[Static] = None
         self._functions_summary: Optional[Static] = None
         self._load_button: Optional[Button] = None
         self._start_button: Optional[Button] = None
         self._stop_button: Optional[Button] = None
-        self._functions_button: Optional[Button] = None
+        self._config_button: Optional[Button] = None
         self._cli_button: Optional[Button] = None
-        self._name_input: Optional[Input] = None
-        self._instructions_input: Optional[Input] = None
-        self._endless_checkbox: Optional[Checkbox] = None
         self._agent_log: Optional[RichLog] = None
 
         self._gen_overrides: Dict[str, float | int] = {}
@@ -97,20 +99,14 @@ class AgentScreen(Screen[None]):
         with Container(id="agent-root"):
             with Container(id="agent-body"):
                 with Container(id="agent-main"):
-                    yield RichLog(id="agent-log", markup=True, auto_scroll=True, wrap=True, highlight=True)
-                    with Static(id="agent-run-panel"):
-                        with Container(id="agent-run-actions"):
-                            start_button = Button("Start", id="agent-start", variant="primary")
-                            self._start_button = start_button
-                            yield start_button
-                            stop_button = Button("Stop", id="agent-stop", variant="error")
-                            stop_button.disabled = True
-                            self._stop_button = stop_button
-                            yield stop_button
+                    agent_log = RichLog(id="agent-log", markup=True, auto_scroll=True, wrap=True, highlight=True)
+                    self._agent_log = agent_log
+                    yield agent_log
+                    
                 with VerticalScroll(id="agent-side"):
                     with Static(id="agent-model-panel"):
                         yield Label("Model", classes="panel-title")
-                        model_value = Label(self._model_id or "<select>", id="agent-model-value")
+                        model_value = Label(self._model_id or "None selected", id="agent-model-value")
                         self._model_label = model_value
                         yield model_value
                         backend_value = Label(self._llm_backend, id="agent-backend-value")
@@ -124,46 +120,33 @@ class AgentScreen(Screen[None]):
                             self._load_button = load_button
                             yield load_button
                             yield Button("Clear Model", id="agent-clear-model", variant="error")
-                    with Static(id="agent-config-panel"):
-                        yield Label("Agent Config", classes="panel-title")
-                        yield Label("Agent Name", classes="agent-field-label")
-                        name_input = Input(id="agent-name-input", placeholder="e.g. research-assistant")
-                        self._name_input = name_input
-                        yield name_input
-                        yield Label("Agent Instructions", classes="agent-field-label")
-                        instructions_input = Input(
-                            id="agent-instructions-input",
-                            placeholder="Describe goals, reasoning style, and constraints...",
-                        )
-                        self._instructions_input = instructions_input
-                        yield instructions_input
-                        endless_checkbox = Checkbox("Endless Mode (ignore end_run)", id="agent-endless-mode")
-                        self._endless_checkbox = endless_checkbox
-                        yield endless_checkbox
-                        with Container(id="agent-config-actions"):
-                            functions_button = Button("Functions", id="agent-open-functions")
-                            self._functions_button = functions_button
-                            yield functions_button
-                            cli_button = Button("CLI Access", id="agent-open-cli")
-                            self._cli_button = cli_button
-                            yield cli_button
+                    with Container(id="agent-config-actions"):
+                        config_button = Button("Agent Config", id="agent-open-config", variant="primary")
+                        self._config_button = config_button
+                        yield config_button
                     with Static(id="agent-status-panel"):
                         yield Label("Status", classes="panel-title")
                         state_value = Label("Idle", id="agent-state-value")
                         self._state_label = state_value
                         yield state_value
-                        functions_summary = Static("", id="agent-functions-summary")
+                        yield Static("Available Functions", classes="panel-title")
+                        functions_summary = Label("0", id="agent-functions-value")
                         self._functions_summary = functions_summary
                         yield functions_summary
+                    with Static(id="agent-run-panel"):
+                        with Container(id="agent-run-actions"):
+                            start_button = Button("Start", id="agent-start", variant="primary")
+                            self._start_button = start_button
+                            yield start_button
+                            stop_button = Button("Stop", id="agent-stop", variant="error")
+                            stop_button.disabled = True
+                            self._stop_button = stop_button
+                            yield stop_button
         yield Footer()
 
     async def on_mount(self, _: Mount) -> None:
-        self._agent_log = self.query_one("#agent-log", RichLog)
-        if self._name_input is not None:
-            self._name_input.value = "cot-agent"
-        if self._endless_checkbox is not None:
-            self._endless_checkbox.value = self._endless_mode
         self._sync_functions_with_runtime()
+        self._refresh_agent_config_summary()
         self._refresh_backend_label()
         self._refresh_state_label()
         self._refresh_functions_summary()
@@ -179,30 +162,20 @@ class AgentScreen(Screen[None]):
         button_id = event.button.id
         if button_id == "agent-open-model-picker":
             self._open_model_picker()
+        elif button_id == "agent-open-config":
+            self._open_agent_config()
         elif button_id == "agent-open-gen-config":
             self._open_gen_config()
         elif button_id == "agent-load-model":
             await self._start_model_load()
         elif button_id == "agent-clear-model":
             self._clear_model()
-        elif button_id == "agent-open-functions":
-            self._open_functions_menu()
         elif button_id == "agent-open-cli":
             self._open_cli_menu()
         elif button_id == "agent-start":
             await self._start_agent()
         elif button_id == "agent-stop":
             self._stop_agent()
-
-    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if event.checkbox.id != "agent-endless-mode":
-            return
-        self._endless_mode = bool(event.value)
-        self._log(
-            "Endless mode enabled; run will only stop on manual Stop."
-            if self._endless_mode
-            else "Endless mode disabled; agent will stop when end_run is called."
-        )
 
     def _open_model_picker(self) -> None:
         self.app.push_screen(ModelPickerScreen(self._model_id or ""), self._handle_model_selected)
@@ -213,7 +186,8 @@ class AgentScreen(Screen[None]):
             [
                 "Agent Screen",
                 "- Start/Stop controls run looping agent execution.",
-                "- Functions opens OpenAI-style tool schema editor.",
+                "- Agent Config opens the name and instructions editor.",
+                "- Builtin tools are loaded from agent/functions.json and code handlers.",
                 "- CLI Access runs one-off shell commands.",
                 "- Endless Mode ignores end_run and loops until manual Stop.",
                 "- h opens this help screen.",
@@ -248,26 +222,25 @@ class AgentScreen(Screen[None]):
             self._apply_gen_config,
         )
 
-    def _open_functions_menu(self) -> None:
-        self._sync_functions_with_runtime()
-        self._refresh_functions_summary()
+    def _open_agent_config(self) -> None:
         self.app.push_screen(
-            AgentFunctionsModal(format_mode=self._function_format, functions=self._agent_functions),
-            self._apply_functions_menu,
+            AgentConfigModal(
+                name=self._agent_name,
+                instructions=self._agent_instructions,
+                endless_mode=self._endless_mode,
+            ),
+            self._apply_agent_config,
         )
 
-    def _apply_functions_menu(self, result: Optional[dict[str, Any]]) -> None:
+    def _apply_agent_config(self, result: Optional[dict[str, Any]]) -> None:
         if not result:
             return
-        functions = result.get("functions")
-        format_mode = str(result.get("format", self._function_format))
-        if not isinstance(functions, list):
-            return
-        self._function_format = "functions" if format_mode == "functions" else "tools"
-        self._agent_functions = list(functions)
-        self._sync_functions_with_runtime()
-        self._refresh_functions_summary()
-        self._log(f"Functions updated: {len(self._agent_functions)} entries ({self._function_format} format).")
+        self._agent_name = str(result.get("name", self._agent_name)).strip() or "cot-agent"
+        self._agent_instructions = str(result.get("instructions", self._agent_instructions)).strip()
+        self._endless_mode = bool(result.get("endless_mode", self._endless_mode))
+        self._refresh_agent_config_summary()
+        self._refresh_state_label()
+        self._log("Agent config updated.")
 
     def _open_cli_menu(self) -> None:
         self.app.push_screen(AgentCLIModal(), self._handle_cli_command)
@@ -393,8 +366,8 @@ class AgentScreen(Screen[None]):
             if not self._model_loaded:
                 return
 
-        name = (self._name_input.value.strip() if self._name_input is not None else "") or "cot-agent"
-        instructions = self._instructions_input.value.strip() if self._instructions_input is not None else ""
+        name = self._agent_name or "cot-agent"
+        instructions = self._agent_instructions.strip()
         if not instructions:
             self._log("Add agent instructions before starting.")
             return
@@ -415,8 +388,7 @@ class AgentScreen(Screen[None]):
             f"alpha_p={gen_cfg['alpha_p']}"
         )
         self._log(
-            f"Function mode: {self._function_format}; "
-            f"functions configured: {len(self._agent_functions)}"
+            f"Available functions: {len(self._agent_functions)}"
         )
         self._log(
             "Endless mode: enabled (ignores end_run)."
@@ -469,15 +441,22 @@ class AgentScreen(Screen[None]):
             max_steps = max(1, int(max_steps_raw))
         except ValueError:
             max_steps = 10
+        max_memory_recoveries = self._env_int("TC_AGENT_MAX_MEMORY_RECOVERIES", 2, minimum=0)
 
         final_reply = ""
+        recovery_attempts = 0
         try:
             step = 0
             while self._agent_running:
                 reason = self._memory_abort_reason()
                 if reason:
+                    if recovery_attempts < max_memory_recoveries and self._recover_from_memory_pressure(reason):
+                        recovery_attempts += 1
+                        await asyncio.sleep(0)
+                        continue
                     self._log(reason)
                     break
+
                 step += 1
                 if not self._endless_mode and step > max_steps:
                     self._log(f"Reached max steps ({max_steps}); stopping loop.")
@@ -486,12 +465,20 @@ class AgentScreen(Screen[None]):
                 try:
                     reply = await asyncio.to_thread(self._generate_agent_reply, self._agent_messages)
                 except MemoryPressureError as exc:
+                    if recovery_attempts < max_memory_recoveries and self._recover_from_memory_pressure(
+                        str(exc),
+                        step=step,
+                    ):
+                        recovery_attempts += 1
+                        await asyncio.sleep(0)
+                        continue
                     self._log(str(exc))
                     break
                 if not reply:
                     self._log(f"[agent][step {step}] Empty response; stopping loop.")
                     break
 
+                recovery_attempts = 0
                 final_reply = reply
                 self._agent_messages.append({"role": "assistant", "content": reply})
                 self._log(f"[agent][step {step}] {reply}")
@@ -711,6 +698,58 @@ class AgentScreen(Screen[None]):
     def _memory_abort_reason(self) -> str | None:
         return memory_abort_reason("agent loop")
 
+    def _recover_from_memory_pressure(self, reason: str, *, step: int | None = None) -> bool:
+        prefix = f"[agent][step {step}] " if step is not None else "[agent] "
+        dropped = self._compact_agent_messages_for_memory_pressure()
+        relieve_memory_pressure(self._model)
+        remaining = self._memory_abort_reason()
+
+        actions: list[str] = []
+        if dropped:
+            actions.append(f"compacted {dropped} older messages")
+        actions.append("cleared runtime caches")
+        self._log(f"{prefix}Memory pressure detected. {', '.join(actions)}.")
+
+        if remaining:
+            self._log(f"{prefix}Memory pressure persists after recovery: {remaining}")
+            return False
+
+        self._log(f"{prefix}Recovered from memory pressure; retrying with reduced context.")
+        return True
+
+    def _compact_agent_messages_for_memory_pressure(self) -> int:
+        keep_tail = self._env_int("TC_AGENT_MEMORY_TRIM_KEEP_MESSAGES", 4, minimum=2)
+        head_count = min(2, len(self._agent_messages))
+        if len(self._agent_messages) <= head_count + keep_tail:
+            return 0
+
+        tail_start = max(head_count, len(self._agent_messages) - keep_tail)
+        trimmed = self._agent_messages[head_count:tail_start]
+        if not trimmed:
+            return 0
+
+        summary_lines: list[str] = []
+        for message in trimmed[-6:]:
+            role = str(message.get("role", "unknown")).strip() or "unknown"
+            content = " ".join(str(message.get("content", "")).split())
+            if len(content) > 160:
+                content = content[:157] + "..."
+            summary_lines.append(f"- {role}: {content or '<empty>'}")
+
+        summary = (
+            "Earlier turns were compacted due to memory pressure. "
+            "Continue from the recent context and preserve the active task."
+        )
+        if summary_lines:
+            summary += "\nCompacted context summary:\n" + "\n".join(summary_lines)
+
+        self._agent_messages = [
+            *self._agent_messages[:head_count],
+            {"role": "user", "content": summary},
+            *self._agent_messages[tail_start:],
+        ]
+        return len(trimmed)
+
     def _extract_function_call(self, text: str) -> tuple[str, dict[str, Any] | str] | None:
         for candidate in self._json_candidates(text):
             try:
@@ -776,16 +815,10 @@ class AgentScreen(Screen[None]):
             self._start_button.disabled = running
         if self._stop_button is not None:
             self._stop_button.disabled = not running
-        if self._functions_button is not None:
-            self._functions_button.disabled = running
+        if self._config_button is not None:
+            self._config_button.disabled = running
         if self._cli_button is not None:
             self._cli_button.disabled = running
-        if self._name_input is not None:
-            self._name_input.disabled = running
-        if self._instructions_input is not None:
-            self._instructions_input.disabled = running
-        if self._endless_checkbox is not None:
-            self._endless_checkbox.disabled = running
 
     @staticmethod
     def _env_flag(name: str, default: bool) -> bool:
@@ -794,77 +827,47 @@ class AgentScreen(Screen[None]):
             return default
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
-    def _sync_functions_with_runtime(self) -> None:
-        builtin = self._agent_runtime.get_agent_functions(format_mode=self._function_format)
-        if not self._agent_functions:
-            self._agent_functions = builtin
-            return
-        self._agent_functions = self._merge_functions(self._agent_functions, builtin)
-
-    def _merge_functions(
-        self,
-        preferred: list[dict[str, Any]],
-        defaults: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        merged: dict[str, dict[str, Any]] = {}
-        extras: list[dict[str, Any]] = []
-
-        for entry in defaults:
-            name = self._function_entry_name(entry)
-            if name is None:
-                extras.append(entry)
-                continue
-            merged[name] = entry
-
-        for entry in preferred:
-            name = self._function_entry_name(entry)
-            if name is None:
-                extras.append(entry)
-                continue
-            merged[name] = entry
-
-        return list(merged.values()) + extras
-
     @staticmethod
-    def _function_entry_name(entry: dict[str, Any]) -> str | None:
-        if not isinstance(entry, dict):
-            return None
-        if isinstance(entry.get("function"), dict):
-            name = entry["function"].get("name")
+    def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+        raw = os.getenv(name)
+        if raw is None:
+            value = default
         else:
-            name = entry.get("name")
-        if isinstance(name, str):
-            stripped = name.strip()
-            return stripped or None
-        return None
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = default
+        if minimum is not None:
+            value = max(minimum, value)
+        return value
+
+    def _sync_functions_with_runtime(self) -> None:
+        self._agent_functions = self._agent_runtime.get_agent_functions(format_mode=self._function_format)
+
+    def _refresh_agent_config_summary(self) -> None:
+        if self._config_summary is None:
+            return
+        preview = " ".join(self._agent_instructions.split())
+        if len(preview) > 180:
+            preview = preview[:177] + "..."
+        if not preview:
+            preview = "<not set>"
+        self._config_summary.update(
+            "\n".join(
+                [
+                    f"Name: {self._agent_name}",
+                    f"Endless Mode: {'On' if self._endless_mode else 'Off'}",
+                    "Instructions:",
+                    preview,
+                ]
+            )
+        )
 
     def _refresh_functions_summary(self) -> None:
         if self._functions_summary is None:
             return
-        builtin_names = self._agent_runtime.list_builtin_functions()
-        enabled_names = sorted(self._enabled_function_names())
-        missing_builtin = [name for name in builtin_names if name not in enabled_names]
-        custom_names = [name for name in enabled_names if name not in builtin_names]
-
-        lines: list[str] = [f"Built-ins ({len(builtin_names)}):"]
-        if builtin_names:
-            lines.extend([f"- {name}" for name in builtin_names])
-        else:
-            lines.append("- none")
-
-        lines.append(f"Enabled ({len(enabled_names)}):")
-        if enabled_names:
-            lines.extend([f"- {name}" for name in enabled_names])
-        else:
-            lines.append("- none")
-
-        if missing_builtin:
-            lines.append("Missing Built-ins:")
-            lines.extend([f"- {name}" for name in missing_builtin])
-        if custom_names:
-            lines.append("Custom Functions:")
-            lines.extend([f"- {name}" for name in custom_names])
-        self._functions_summary.update("\n".join(lines))
+        specs = self._agent_runtime.get_function_specs()
+        self._functions_summary.update(f"{len(specs)}")
 
     def _set_load_button_enabled(self, enabled: bool) -> None:
         if self._load_button is not None:
@@ -906,200 +909,78 @@ class AgentScreen(Screen[None]):
         self._agent_log.scroll_end(animate=False, force=True)
 
 
-class AgentCLIModal(ModalScreen[Optional[str]]):
-    """Simple modal for one-off local CLI command execution."""
-
-    def __init__(self) -> None:
-        super().__init__(id="agent-cli-modal")
-        self._command_input: Optional[Input] = None
-
-    def compose(self) -> ComposeResult:
-        with Container(id="agent-cli-modal-container"):
-            yield Label("CLI Access", id="agent-cli-title")
-            yield Label("Enter a shell command to run on this machine:", id="agent-cli-help")
-            command_input = Input(id="agent-cli-command", placeholder="e.g. ls -la")
-            self._command_input = command_input
-            yield command_input
-            with Container(id="agent-cli-buttons"):
-                yield Button("Cancel", id="agent-cli-cancel")
-                yield Button("Run", id="agent-cli-run", variant="primary")
-
-    def on_mount(self, _: Mount) -> None:
-        if self._command_input is not None:
-            self.call_after_refresh(self._command_input.focus)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "agent-cli-cancel":
-            self.dismiss(None)
-        elif event.button.id == "agent-cli-run":
-            value = self._command_input.value.strip() if self._command_input is not None else ""
-            self.dismiss(value or None)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "agent-cli-command":
-            return
-        value = event.value.strip()
-        self.dismiss(value or None)
-
-
-class AgentFunctionsModal(ModalScreen[Optional[dict[str, Any]]]):
-    """Modal for defining OpenAI-style function specs."""
-
-    def __init__(self, *, format_mode: str, functions: list[dict[str, Any]]) -> None:
-        super().__init__(id="agent-functions-modal")
-        self._format_mode = "functions" if format_mode == "functions" else "tools"
-        self._functions = list(functions)
-
-        self._format_value: Optional[Label] = None
+class AgentConfigModal(ModalScreen[Optional[dict[str, Any]]]):
+    def __init__(self, *, name: str, instructions: str, endless_mode: bool) -> None:
+        super().__init__(id="agent-config-modal")
+        self._initial_name = name
+        self._initial_instructions = instructions
+        self._initial_endless_mode = endless_mode
         self._name_input: Optional[Input] = None
-        self._description_input: Optional[Input] = None
-        self._params_input: Optional[Input] = None
+        self._instructions_area: Optional[TextArea] = None
+        self._endless_checkbox: Optional[Checkbox] = None
         self._status: Optional[Label] = None
-        self._preview: Optional[Static] = None
-        self._tools_button: Optional[Button] = None
-        self._functions_button: Optional[Button] = None
 
     def compose(self) -> ComposeResult:
-        with Container(id="agent-functions-modal-container"):
-            yield Label("Agent Functions", id="agent-functions-title")
-            yield Label("Format", classes="agent-functions-label")
-            format_value = Label("", id="agent-functions-format")
-            self._format_value = format_value
-            yield format_value
-            with Container(id="agent-functions-mode-buttons"):
-                tools_button = Button("OpenAI Tools", id="agent-functions-mode-tools")
-                self._tools_button = tools_button
-                yield tools_button
-                functions_button = Button("Legacy Functions", id="agent-functions-mode-functions")
-                self._functions_button = functions_button
-                yield functions_button
-
-            yield Label("Function Name", classes="agent-functions-label")
-            name_input = Input(id="agent-functions-name", placeholder="get_weather")
+        with Container(id="agent-config-modal-container"):
+            yield Label("Agent Config", id="agent-config-title")
+            yield Label("Agent Name", classes="agent-field-label")
+            name_input = Input(id="agent-config-name", placeholder="e.g. research-assistant")
             self._name_input = name_input
             yield name_input
 
-            yield Label("Description", classes="agent-functions-label")
-            description_input = Input(id="agent-functions-description", placeholder="Describe what the function does")
-            self._description_input = description_input
-            yield description_input
-
-            yield Label("Parameters JSON Schema", classes="agent-functions-label")
-            params_input = Input(
-                id="agent-functions-params",
-                placeholder='{"type":"object","properties":{...},"required":[...]}',
+            yield Label("Instructions", classes="agent-field-label")
+            instructions_area = TextArea(
+                self._initial_instructions,
+                id="agent-config-instructions",
+                soft_wrap=True,
+                show_line_numbers=False,
+                placeholder="Describe goals, reasoning style, constraints, and desired output.",
             )
-            self._params_input = params_input
-            yield params_input
+            self._instructions_area = instructions_area
+            yield instructions_area
 
-            status = Label("", id="agent-functions-status")
+            endless_checkbox = Checkbox("Endless Mode (ignore end_run)", id="agent-config-endless-mode")
+            self._endless_checkbox = endless_checkbox
+            yield endless_checkbox
+
+            status = Label("", id="agent-config-status")
             self._status = status
             yield status
 
-            preview = Static("", id="agent-functions-preview")
-            self._preview = preview
-            yield preview
-
-            with Container(id="agent-functions-buttons"):
-                yield Button("Add", id="agent-functions-add", variant="primary")
-                yield Button("Remove Last", id="agent-functions-remove")
-                yield Button("Cancel", id="agent-functions-cancel")
-                yield Button("Save", id="agent-functions-save", variant="success")
+            with Container(id="agent-config-buttons"):
+                yield Button("Cancel", id="agent-config-cancel")
+                yield Button("Save", id="agent-config-save", variant="primary")
 
     def on_mount(self, _: Mount) -> None:
-        if self._params_input is not None:
-            self._params_input.value = '{"type":"object","properties":{},"required":[]}'
-        self._refresh_format_ui()
-        self._refresh_preview()
+        if self._name_input is not None:
+            self._name_input.value = self._initial_name
+            self.call_after_refresh(self._name_input.focus)
+        if self._endless_checkbox is not None:
+            self._endless_checkbox.value = self._initial_endless_mode
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "agent-functions-mode-tools":
-            self._format_mode = "tools"
-            self._refresh_format_ui()
-            return
-        if button_id == "agent-functions-mode-functions":
-            self._format_mode = "functions"
-            self._refresh_format_ui()
-            return
-        if button_id == "agent-functions-add":
-            self._add_function()
-            return
-        if button_id == "agent-functions-remove":
-            if self._functions:
-                self._functions.pop()
-                self._set_status("Removed last function.")
-                self._refresh_preview()
-            else:
-                self._set_status("No functions to remove.")
-            return
-        if button_id == "agent-functions-cancel":
+        if event.button.id == "agent-config-cancel":
             self.dismiss(None)
             return
-        if button_id == "agent-functions-save":
-            self.dismiss({"format": self._format_mode, "functions": self._functions})
+        if event.button.id != "agent-config-save":
+            return
 
-    def _add_function(self) -> None:
         name = self._name_input.value.strip() if self._name_input is not None else ""
-        description = self._description_input.value.strip() if self._description_input is not None else ""
-        raw_params = self._params_input.value.strip() if self._params_input is not None else ""
+        instructions = self._instructions_area.text.strip() if self._instructions_area is not None else ""
+        endless_mode = bool(self._endless_checkbox.value) if self._endless_checkbox is not None else False
 
         if not name:
-            self._set_status("Function name is required.")
-            return
-        if not description:
-            self._set_status("Function description is required.")
-            return
-        if not raw_params:
-            self._set_status("Parameters JSON is required.")
-            return
+            name = "cot-agent"
+        if not instructions:
+            self._set_status("Instructions are empty. The agent will refuse to start until you add them.")
 
-        try:
-            parameters = json.loads(raw_params)
-        except json.JSONDecodeError as exc:
-            self._set_status(f"Invalid JSON: {exc}")
-            return
-        if not isinstance(parameters, dict):
-            self._set_status("Parameters must decode to a JSON object.")
-            return
-
-        if self._format_mode == "tools":
-            entry: dict[str, Any] = {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
-                    "parameters": parameters,
-                },
-            }
-        else:
-            entry = {
+        self.dismiss(
+            {
                 "name": name,
-                "description": description,
-                "parameters": parameters,
+                "instructions": instructions,
+                "endless_mode": endless_mode,
             }
-        self._functions.append(entry)
-        self._set_status(f"Added function '{name}'.")
-        self._refresh_preview()
-
-    def _refresh_format_ui(self) -> None:
-        if self._format_value is not None:
-            self._format_value.update(
-                "OpenAI tools format" if self._format_mode == "tools" else "OpenAI legacy functions format"
-            )
-        if self._tools_button is not None:
-            self._tools_button.variant = "primary" if self._format_mode == "tools" else "default"
-        if self._functions_button is not None:
-            self._functions_button.variant = "primary" if self._format_mode == "functions" else "default"
-
-    def _refresh_preview(self) -> None:
-        if self._preview is None:
-            return
-        if not self._functions:
-            self._preview.update("No functions configured.")
-            return
-        rendered = json.dumps(self._functions, indent=2)
-        self._preview.update(rendered)
+        )
 
     def _set_status(self, message: str) -> None:
         if self._status is not None:
