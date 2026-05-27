@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -70,10 +71,56 @@ def normalize_backend_device(value: str | None, backend: str | None = None) -> s
 
     if selected == "torch":
         normalized = raw.lower()
-        return "mps" if normalized == "metal" else normalized
+        if normalized == "metal":
+            return "mps"
+        if normalized in {"amd", "rocm", "hip"}:
+            return "cuda"
+        for prefix in ("amd:", "rocm:", "hip:"):
+            if normalized.startswith(prefix):
+                return f"cuda:{normalized.split(':', 1)[1]}"
+        return normalized
 
     normalized = raw.upper()
-    return "METAL" if normalized == "MPS" else normalized
+    if normalized == "MPS":
+        return "METAL"
+    if normalized in {"HIP", "ROCM"}:
+        return "AMD"
+    for prefix in ("HIP:", "ROCM:"):
+        if normalized.startswith(prefix):
+            return f"AMD:{normalized.split(':', 1)[1]}"
+    return normalized
+
+
+def backend_device_from_report(
+    device: Mapping[str, object],
+    backend: str | None = None,
+) -> str:
+    selected = normalize_llm_backend(backend or os.getenv(LLM_BACKEND_ENV))
+    kind = str(device.get("kind", "device")).upper()
+    raw_device = str(device.get("device", kind)).strip()
+    device_upper = raw_device.upper()
+    name = str(device.get("name", "")).lower()
+
+    if selected == "torch":
+        if kind == "CPU":
+            return "cpu"
+        if device_upper in {"METAL", "MPS"} or "apple" in name:
+            return "mps"
+        if device_upper in {"CUDA", "GPU"}:
+            return "cuda"
+        if device_upper in {"AMD", "ROCM", "HIP"} or "radeon" in name:
+            return "cuda"
+        return "cpu"
+
+    if kind == "CPU":
+        return "CPU"
+    if device_upper in {"MPS", "METAL"} or "apple" in name:
+        return "METAL"
+    if device_upper == "CUDA":
+        return "CUDA"
+    if device_upper in {"AMD", "ROCM", "HIP"} or "radeon" in name:
+        return "AMD"
+    return device_upper or "CPU"
 
 
 def get_backend_device(

@@ -14,6 +14,7 @@ from textual.widgets import Button, Checkbox, Footer, Header, Label, Static
 from cheetah.tui.help_screen import HelpScreen
 from cheetah.models.llm.backend import (
     LLM_BACKEND_ENV,
+    backend_device_from_report,
     backend_device_env,
     get_backend_device,
     get_llm_backend,
@@ -240,31 +241,7 @@ class SettingsScreen(Screen[None]):
         return normalize_backend_device(value, backend)
 
     def _device_value_for_backend(self, device: Dict[str, object], backend: str) -> str:
-        kind = str(device.get("kind", "device")).upper()
-        raw_device = str(device.get("device", kind)).strip()
-        device_upper = raw_device.upper()
-        name = str(device.get("name", "")).lower()
-
-        if backend == "torch":
-            if kind == "CPU":
-                return "cpu"
-            if device_upper in {"METAL", "MPS"} or "apple" in name:
-                return "mps"
-            if device_upper in {"CUDA", "GPU"}:
-                return "cuda"
-            if device_upper in {"AMD", "ROCM", "HIP"}:
-                # ROCm builds typically expose devices through torch.cuda.
-                return "cuda"
-            return "cpu"
-
-        # tinygrad backend values
-        if kind == "CPU":
-            return "CPU"
-        if device_upper in {"MPS", "METAL"} or "apple" in name:
-            return "METAL"
-        if device_upper in {"CUDA", "AMD"}:
-            return device_upper
-        return device_upper or "CPU"
+        return backend_device_from_report(device, backend)
 
     def _persist_env_setting(self, key: str, value: str) -> None:
         env_path = Path(__file__).resolve().parents[2] / ".env"

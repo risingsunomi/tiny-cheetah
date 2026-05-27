@@ -67,5 +67,33 @@ class TestBackendFingerprints(unittest.TestCase):
         )
 
 
+class TestBackendDevices(unittest.TestCase):
+    def test_normalize_backend_device_maps_rocm_aliases(self) -> None:
+        self.assertEqual(backend.normalize_backend_device("rocm", "torch"), "cuda")
+        self.assertEqual(backend.normalize_backend_device("hip:1", "torch"), "cuda:1")
+        self.assertEqual(backend.normalize_backend_device("ROCM", "tinygrad"), "AMD")
+        self.assertEqual(backend.normalize_backend_device("HIP:1", "tinygrad"), "AMD:1")
+
+    def test_backend_device_from_report_maps_rocm_for_each_backend(self) -> None:
+        device = {
+            "kind": "GPU",
+            "device": "ROCM",
+            "name": "AMD Radeon RX 7900 XTX",
+        }
+
+        self.assertEqual(backend.backend_device_from_report(device, "torch"), "cuda")
+        self.assertEqual(backend.backend_device_from_report(device, "tinygrad"), "AMD")
+
+    def test_backend_device_from_report_preserves_existing_gpu_backends(self) -> None:
+        self.assertEqual(
+            backend.backend_device_from_report({"kind": "GPU", "device": "CUDA"}, "tinygrad"),
+            "CUDA",
+        )
+        self.assertEqual(
+            backend.backend_device_from_report({"kind": "GPU", "device": "METAL"}, "torch"),
+            "mps",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

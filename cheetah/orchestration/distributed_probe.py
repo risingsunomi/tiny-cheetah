@@ -116,7 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _add_runtime_args(parser: argparse.ArgumentParser, *, default_port: int) -> None:
     parser.add_argument("--backend", choices=("tinygrad", "torch"), default=os.getenv("TC_LLM_BACKEND", "tinygrad"))
-    parser.add_argument("--device", default="", help="backend device override, e.g. CPU, METAL, mps, cuda")
+    parser.add_argument("--device", default="", help="backend device override, e.g. CPU, METAL, AMD, mps, cuda")
     parser.add_argument("--bind", default=os.getenv("TC_BIND_ADDRESS", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("TC_PORT", str(default_port))))
     parser.add_argument("--peer-id", default=os.getenv("TC_PEER_ID", ""))

@@ -60,11 +60,10 @@ def _gpus() -> List[Dict[str, object]]:
     gpus: List[Dict[str, object]] = []
     system = platform.system()
 
-    # Linux/Windows: try CUDA then ROCm, then a light WMI hint on Windows.
+    # Linux/Windows: probe CUDA and ROCm, then a light WMI hint on Windows.
     if system in {"Linux", "Windows"}:
         gpus.extend(_cuda_gpus())
-        if not gpus:
-            gpus.extend(_rocm_gpus())
+        gpus.extend(_dedupe_gpus(gpus, _rocm_gpus()))
         if not gpus and system == "Windows":
             gpus.extend(_windows_gpu_hint())
 
@@ -206,6 +205,43 @@ def _cuda_gpus() -> List[Dict[str, object]]:
     return gpus
 
 
+def _dedupe_gpus(
+    existing: List[Dict[str, object]],
+    candidates: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    seen = {
+        str(gpu.get("name", "")).strip().lower()
+        for gpu in existing
+        if str(gpu.get("name", "")).strip()
+    }
+    unique: List[Dict[str, object]] = []
+    for gpu in candidates:
+        name = str(gpu.get("name", "")).strip().lower()
+        if name and name in seen:
+            continue
+        unique.append(gpu)
+    return unique
+
+
+def _parse_rocm_mem_gb(value: str) -> float:
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", value)
+    if not match:
+        return 0.0
+    num = float(match.group(1))
+    lower = value.lower()
+    if "tib" in lower or "tb" in lower:
+        num *= 1024.0
+    elif "gib" in lower or "gb" in lower:
+        pass
+    elif "mib" in lower or "mb" in lower:
+        num /= 1024.0
+    elif "kib" in lower or "kb" in lower:
+        num /= 1024.0 ** 2
+    elif num > 1024 ** 2:
+        num /= 1024.0 ** 3
+    return round(num, 2)
+
+
 def _rocm_gpus() -> List[Dict[str, object]]:
     """Detect AMD GPUs via rocm-smi, if present."""
     cmd = ["rocm-smi", "--showproductname", "--showmeminfo", "vram"]
@@ -213,19 +249,36 @@ def _rocm_gpus() -> List[Dict[str, object]]:
         output = subprocess.check_output(cmd, text=True, timeout=2)
     except Exception:
         return []
-    gpus: List[Dict[str, object]] = []
-    current: Dict[str, object] = {}
+    gpus_by_id: Dict[str, Dict[str, object]] = {}
+    order: List[str] = []
+    current_id = "0"
+
+    def current_gpu(gpu_id: str) -> Dict[str, object]:
+        if gpu_id not in gpus_by_id:
+            gpus_by_id[gpu_id] = {"device": "ROCM"}
+            order.append(gpu_id)
+        return gpus_by_id[gpu_id]
+
     for raw in output.splitlines():
         line = raw.strip()
         if not line or line.startswith(("#", "=")):
             continue
+
+        prefixed = re.match(r"GPU\[(\d+)\]\s*:\s*(.*)", line, flags=re.IGNORECASE)
+        if prefixed:
+            current_id = prefixed.group(1)
+            line = prefixed.group(2).strip()
+        else:
+            header = re.match(r"GPU\s+(\d+)\s*:?\s*(.*)", line, flags=re.IGNORECASE)
+            if header:
+                current_id = header.group(1)
+                line = header.group(2).strip()
+                if not line:
+                    current_gpu(current_id)
+                    continue
+
+        current = current_gpu(current_id)
         lower = line.lower()
-        if lower.startswith("gpu"):
-            if current:
-                current.setdefault("device", "AMD")
-                gpus.append(current)
-            current = {}
-            continue
         if "product name" in lower:
             try:
                 _, val = line.split(":", 1)
@@ -235,13 +288,28 @@ def _rocm_gpus() -> List[Dict[str, object]]:
         if "vram total memory" in lower:
             try:
                 _, val = line.split(":", 1)
-                bytes_val = float(val.strip().split()[0])
-                current["total_mem_gb"] = round(bytes_val / (1024 ** 3), 2)
+                current["total_mem_gb"] = _parse_rocm_mem_gb(val)
             except Exception:
                 continue
-    if current:
-        current.setdefault("device", "AMD")
-        gpus.append(current)
+        if "vram total used memory" in lower:
+            try:
+                _, val = line.split(":", 1)
+                current["_used_mem_gb"] = _parse_rocm_mem_gb(val)
+            except Exception:
+                continue
+
+    gpus: List[Dict[str, object]] = []
+    for gpu_id in order:
+        gpu = gpus_by_id[gpu_id]
+        if not gpu:
+            continue
+        total_gb = float(gpu.get("total_mem_gb", 0.0) or 0.0)
+        used_gb = float(gpu.pop("_used_mem_gb", 0.0) or 0.0)
+        if total_gb and used_gb:
+            gpu["available_vram_gb"] = round(max(total_gb - used_gb, 0.0), 2)
+        gpu.setdefault("name", "AMD GPU")
+        gpu.setdefault("device", "ROCM")
+        gpus.append(gpu)
     return gpus
 
 
